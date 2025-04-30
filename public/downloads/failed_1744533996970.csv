@@ -1,0 +1,3 @@
+"MOD_ID","CV_URL","Errors"
+"8","https://bucketboxcdn.s3.ap-south-1.amazonaws.com/databox/resource/6854bf24-4a9e-4b77-a7e5-41f5d955998a_Chinedu-Chukwudum-Resume.pdf","Failed to extract data from text"
+"17","https://bucketboxcdn.s3.ap-south-1.amazonaws.com/databox/resource/d521b349-1c89-47d0-81c7-09c8ba8a24a9_Nadeem.S_ Functional consultant.docx","compareArrays is not defined"

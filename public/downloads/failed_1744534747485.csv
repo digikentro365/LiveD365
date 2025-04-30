@@ -1,0 +1,4 @@
+"MOD_ID","CV_URL","Errors"
+,,"Missing MOD_ID or CV_URL"
+"10","https://bucketboxcdn.s3.ap-south-1.amazonaws.com/databox/resource/9ec7916d-9727-4001-a749-37094c08c6ba_John Bosco-Latest Profile.doc","Failed to extract text from CV"
+"16","https://bucketboxcdn.s3.ap-south-1.amazonaws.com/databox/resource/524ffdc5-30aa-496c-b7c1-342e15215f82_Aslam Khan MSD365BC.pdf","CV contains no email address - skipping"

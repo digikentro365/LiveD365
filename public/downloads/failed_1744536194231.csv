@@ -1,0 +1,3 @@
+"MOD_ID","CV_URL","Errors"
+,,"Missing MOD_ID or CV_URL"
+"8","https://bucketboxcdn.s3.ap-south-1.amazonaws.com/databox/resource/6854bf24-4a9e-4b77-a7e5-41f5d955998a_Chinedu-Chukwudum-Resume.pdf","Failed to extract data from text"

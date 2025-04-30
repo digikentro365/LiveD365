@@ -1,0 +1,222 @@
+//1. Email Conflict Handling (Your New Requirements)
+
+// Scenario	Behavior
+// Same MOD_ID, different email	❌ Skips (does not update)
+// Different MOD_ID, same email	✅ Updates (changes MOD_ID but keeps email)
+// New MOD_ID + new email	✅ Creates new userr
+
+router.post('/bulk-upload', isAdmin, upload.single('file'), async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ error: "CSV file is required" });
+        }
+
+        const adminId = req.admin._id;
+        const adminDetails = await User.findById(adminId);
+        if (!adminDetails) {
+            return res.status(404).json({ error: "Admin not found" });
+        }
+
+        const results = [];
+        const failedRecords = [];
+        let processedCount = 0;
+
+        // Parse CSV file
+        await new Promise((resolve, reject) => {
+            fs.createReadStream(req.file.path)
+                .pipe(csv())
+                .on('data', (data) => results.push(data))
+                .on('end', resolve)
+                .on('error', reject);
+        });
+
+        // Process records with limited concurrency (5 at a time)
+        const concurrencyLimit = 5;
+        
+        const processRecord = async (row) => {
+            const recordResult = {
+                MOD_ID: row.MOD_ID,
+                success: false,
+                errors: []
+            };
+
+            try {
+                const { MOD_ID, CV_URL } = row;
+                if (!MOD_ID || !CV_URL) {
+                    throw new Error("Missing MOD_ID or CV_URL");
+                }
+
+                // 1. Download CV
+                const savedFilePath = await downloadFile(CV_URL, MOD_ID);
+                if (!savedFilePath) {
+                    throw new Error("Failed to download CV");
+                }
+
+                // 2. Extract text from CV
+                const extractedText = await extractTextFromCV(savedFilePath);
+                if (!extractedText) {
+                    throw new Error("Failed to extract text from CV");
+                }
+
+                // 3. Convert to JSON using Gemini
+                const extractedData = await getJsonFromGemini(extractedText);
+                if (!extractedData) {
+                    throw new Error("Failed to extract data from text");
+                }
+
+                // Get email from CV or generate a unique one
+                const cvEmail = extractedData.personalInformation?.email || 
+                               `${adminDetails.email.split('@')[0]}+${MOD_ID}@${adminDetails.email.split('@')[1]}`;
+
+                // Check if MOD_ID exists (regardless of email)
+                const existingUserWithMOD_ID = await User.findOne({ modId: MOD_ID });
+
+                if (existingUserWithMOD_ID) {
+                    // CASE 1: Same MOD_ID, different email → SKIP (NEW REQUIREMENT)
+                    if (existingUserWithMOD_ID.email !== cvEmail) {
+                        throw new Error(`Cannot change email for MOD_ID ${MOD_ID} (current: ${existingUserWithMOD_ID.email}, new: ${cvEmail})`);
+                    }
+
+                    // If same MOD_ID and same email → UPDATE
+                    await User.updateOne(
+                        { modId: MOD_ID },
+                        { 
+                            $set: {
+                                adminId,
+                                cvPath: savedFilePath,
+                                extractText: extractedText,
+                                personalInformation: {
+                                    firstName: extractedData.personalInformation?.firstName || null,
+                                    lastName: extractedData.personalInformation?.lastName || null,
+                                    email: cvEmail,
+                                    contactNo: extractedData.personalInformation?.contactNo || null,
+                                    city: extractedData.personalInformation?.city || null,
+                                    state: extractedData.personalInformation?.state || null,
+                                    country: extractedData.personalInformation?.country || null,
+                                },
+                                about: {
+                                    description: extractedData.about?.description || null,
+                                    linkedInURL: extractedData.about?.linkedInURL || null,
+                                    professionalTitle: extractedData.about?.professionalTitle || null,
+                                    primaryRole: extractedData.about?.primaryRole || null,
+                                    microsoftDynamicsExpertise: extractedData.about?.microsoftDynamicsExpertise || null,
+                                    microsoftDynamicsProduct: extractedData.about?.microsoftDynamicsProduct || [],
+                                    yearsOfExperience: extractedData.about?.yearsOfExperience || null
+                                }
+                            },
+                            $addToSet: {
+                                skills: { $each: extractedData.skills || [] },
+                                projectExperience: { $each: extractedData.projectExperience || [] },
+                                MicrosoftCertificates: { $each: extractedData.microsoftCertificates || [] },
+                                Qualification: { $each: extractedData.Qualification || [] },
+                                workExperience: { $each: extractedData.workExperience || [] }
+                            }
+                        }
+                    );
+                } else {
+                    // CASE 2: Different MOD_ID, same email → UPDATE existing user (NEW REQUIREMENT)
+                    const existingUserWithEmail = await User.findOne({ email: cvEmail });
+                    
+                    if (existingUserWithEmail) {
+                        // Update the existing user (change MOD_ID but keep email)
+                        await User.updateOne(
+                            { email: cvEmail },
+                            { 
+                                $set: {
+                                    modId: MOD_ID, // Update MOD_ID
+                                    adminId,
+                                    cvPath: savedFilePath,
+                                    extractText: extractedText,
+                                    // ... other fields (same as above)
+                                },
+                                $addToSet: {
+                                    // ... same $addToSet as above
+                                }
+                            }
+                        );
+                    } else {
+                        // CASE 3: New MOD_ID and new email → CREATE
+                        await User.create({
+                            firstName: adminDetails.firstName,
+                            lastName: adminDetails.lastName,
+                            email: cvEmail,
+                            contactNo: adminDetails.contactNo,
+                            role: 'user',
+                            password: null,
+                            modId: MOD_ID,
+                            adminId,
+                            cvPath: savedFilePath,
+                            extractText: extractedText,
+                            personalInformation: {
+                                firstName: extractedData.personalInformation?.firstName || null,
+                                lastName: extractedData.personalInformation?.lastName || null,
+                                email: cvEmail,
+                                contactNo: extractedData.personalInformation?.contactNo || null,
+                                city: extractedData.personalInformation?.city || null,
+                                state: extractedData.personalInformation?.state || null,
+                                country: extractedData.personalInformation?.country || null,
+                            },
+                            about: {
+                                description: extractedData.about?.description || null,
+                                linkedInURL: extractedData.about?.linkedInURL || null,
+                                professionalTitle: extractedData.about?.professionalTitle || null,
+                                primaryRole: extractedData.about?.primaryRole || null,
+                                microsoftDynamicsExpertise: extractedData.about?.microsoftDynamicsExpertise || null,
+                                microsoftDynamicsProduct: extractedData.about?.microsoftDynamicsProduct || [],
+                                yearsOfExperience: extractedData.about?.yearsOfExperience || null
+                            },
+                            skills: extractedData.skills || [],
+                            projectExperience: extractedData.projectExperience || [],
+                            MicrosoftCertificates: extractedData.microsoftCertificates || [],
+                            Qualification: extractedData.Qualification || [],
+                            workExperience: extractedData.workExperience || []
+                        });
+                    }
+                }
+
+                recordResult.success = true;
+                processedCount++;
+            } catch (error) {
+                console.error(`Error processing MOD_ID ${row.MOD_ID || 'unknown'}:`, error);
+                recordResult.errors.push(error.message);
+                failedRecords.push(recordResult);
+            }
+
+            return recordResult;
+        };
+
+        // Process in batches for concurrency control
+        const batches = [];
+        for (let i = 0; i < results.length; i += concurrencyLimit) {
+            batches.push(results.slice(i, i + concurrencyLimit));
+        }
+
+        for (const batch of batches) {
+            await Promise.all(batch.map(processRecord));
+        }
+
+        // Cleanup uploaded file
+        try {
+            await fs.promises.unlink(req.file.path);
+        } catch (cleanupError) {
+            console.error("Failed to cleanup uploaded file:", cleanupError);
+        }
+
+        res.status(200).json({
+            message: "Bulk upload processed",
+            stats: {
+                total: results.length,
+                success: processedCount,
+                failed: failedRecords.length,
+            },
+            failedRecords: failedRecords.length > 0 ? failedRecords : undefined
+        });
+
+    } catch (err) {
+        console.error("Error in bulk upload:", err);
+        res.status(500).json({ 
+            error: "Internal Server Error",
+            details: err.message 
+        });
+    }
+});

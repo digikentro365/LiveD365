@@ -1,0 +1,2049 @@
+const express = require('express');
+const router = express.Router();
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+const mammoth = require('mammoth');
+const pdfParse = require('pdf-parse');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
+const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
+const nodemailer = require('nodemailer');
+const User = require('../models/user');
+const PDFDocument = require("pdfkit");
+const moment = require('moment');
+
+
+require('dotenv').config();
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
+//store CV in uploads folder with name and date
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => cb(null, './uploads'),
+    filename: (req, file, cb) => cb(null, Date.now() + '-' + file.originalname)
+});
+const upload = multer({ storage });
+
+// Middleware for authentication
+const authenticateToken = (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+
+    if (!token) return res.status(401).send({ message: "Access denied. No token provided." });
+
+    jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+        if (err) return res.status(403).send({ message: "Invalid or expired token." });
+
+        console.log("Authenticated User ID:", user.userId);  // Debug log
+        req.user = user;
+        next();
+    });
+};
+
+//gmail id from where mail has been sent(for code varification using nodemialer SMTP method -gmail)
+const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS
+    }
+});
+
+//code generation using crypto
+function generate4DigitCode() {
+    return crypto.randomInt(1000, 10000).toString();
+}
+
+//defined null initially then generated code stored in this
+const verificationCodes = {};
+
+// Function to normalize date
+const normalizeDate = (dateString) => {
+    const formats = [
+        'MMM DD, YYYY', // Feb 07, 2022
+        'DD-MM-YYYY',   // 12-02-1994
+        'YYYY-MM-DD'    // 2022-10-14
+    ];
+
+    for (const format of formats) {
+        const date = moment(dateString, format, true); // Use strict parsing
+        if (date.isValid()) {
+            return date.format('YYYY-MM-DD'); // Normalize to YYYY-MM-DD
+        }
+    }
+
+    return null; // Return null if the date cannot be parsed
+};
+
+
+// **Move this function ABOVE the register route**   working properly
+async function getJsonFromGemini(text) {
+    try {
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
+        const prompt = `
+        Extract the relevant information from the following resume text and return it as a structured JSON object.
+        The JSON should include: 
+        - personalInformation(firstName, lastName, email, contactNo, city, state, country)
+        - about(description, professionalTitle, primaryRole, microsoftDynamicsExpertise, microsoftDynamicsProduct, yearsOfExperience, linkedInURL)
+        - Qualification (array with UniversityName, Degree, Field_of_study, description)
+        - workExperience (array with companyName, jobTitle, designation, industryType, location, currentlyWorking, startDate, endDate, description)
+        - skills (array)
+        - projectExperience (array with projectName, jobTitle, description, technologiesUsed, startDate, endDate)
+
+        Resume text:
+        ${text}
+        `;
+
+        const response = await model.generateContent(prompt);
+        const result = response.response;
+
+        if (!result || !result.text) {
+            throw new Error("Invalid response from Gemini API");
+        }
+
+        let jsonString = result.text();
+        jsonString = jsonString.replace(/```json|```/gi, '').trim(); // Remove code block markers if present
+
+        return JSON.parse(jsonString);
+    } catch (error) {
+        console.error("Error extracting JSON from Gemini:", error);
+        return null; // Return null in case of failure
+    }
+}
+
+//helper function to convert data into text
+const generateExtractText = (user) => {
+    const extractText = `
+        Personal Information:
+        Name: ${user.personalInformation.firstName} ${user.personalInformation.lastName}
+        Email: ${user.personalInformation.email}
+        Contact: ${user.personalInformation.contactNo}
+        City: ${user.personalInformation.city}
+        State: ${user.personalInformation.state}
+        Country: ${user.personalInformation.country}
+
+        About:
+        Description: ${user.about.description}
+        LinkedIn: ${user.about.linkedInURL}
+        Professional Title: ${user.about.professionalTitle}
+        Primary Role: ${user.about.primaryRole}
+        Microsoft Dynamics Expertise: ${user.about.microsoftDynamicsExpertise}
+        Microsoft Dynamics Product: ${user.about.microsoftDynamicsProduct}
+        Years of Experience: ${user.about.yearsOfExperience}
+
+        Skills:
+        ${user.skills.join(", ")}
+
+        Work Experience:
+        ${user.workExperience.map(work => `
+            Company: ${work.companyName}
+            Job Title: ${work.jobTitle}
+            Designation: ${work.designation}
+            Industry: ${work.industryType}
+            Location: ${work.location}
+            Currently Working: ${work.currentlyWorking}
+            Start Date: ${work.startDate.month} ${work.startDate.year}
+            End Date: ${work.currentlyWorking ? "Present" : `${work.endDate.month} ${work.endDate.year}`}
+            Description: ${work.description}
+        `).join("\n")}
+
+        Qualifications:
+        ${user.Qualification.map(edu => `
+            University: ${edu.UniversityName}
+            Degree: ${edu.Degree}
+            Field of Study: ${edu.Field_of_study}
+            Start Date: ${edu.Start_month_year}
+            End Date: ${edu.End_month_year}
+            Description: ${edu.description}
+        `).join("\n")}
+
+        Certifications:
+        ${user.MicrosoftCertificates.map(cert => `
+            Certificate: ${cert.CertificateName}
+            Date Earned: ${cert.DateEarned}
+            Validity: ${cert.ValidityDate}
+            URL: ${cert.certificateURL}
+            Description: ${cert.description}
+        `).join("\n")}
+
+        Projects:
+        ${user.projectExperience.map(proj => `
+            Project: ${proj.projectName}
+            Job Title: ${proj.jobTitle}
+            Description: ${proj.description}
+            Technologies: ${Array.isArray(proj.technologiesUsed) ? proj.technologiesUsed.join(", ") : ""}
+
+            Start Date: ${proj.startDate}
+            End Date: ${proj.endDate}
+        `).join("\n")}
+    `;
+
+    return extractText.trim(); // Remove leading/trailing whitespace
+};
+
+// router.post('/register', upload.single('file'), async (req, res) => {
+//     try {
+//         const { firstName, lastName, email, password, contactNo } = req.body;
+
+//         if (!email || !password || !contactNo) {
+//             return res.status(400).json("Email, Password, and ContactNo are required");
+//         }
+
+//         const passwordCheck = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/;
+//         if (!passwordCheck.test(password)) {
+//             return res.status(400).json({
+//                 error: "Password must contain at least 1 uppercase letter, 1 lowercase letter, 1 digit, and 1 special character."
+//             });
+//         }
+
+//         const existingUser = await User.findOne({ email });
+//         if (existingUser) return res.status(409).json('Email already exists.');
+
+//         const hashedPassword = await bcrypt.hash(password, 10);
+
+//         let personalInformation = { };
+//         let about = {};
+//         let skills = [];
+//         let projectExperience = [];
+//         let MicrosoftCertificates = [];
+//         let Qualification = [];
+//         let workExperience = [];
+//         let extractText = "";
+
+//         if (req.file) {
+//             const { path: filePath, originalname: filename } = req.file;
+//             const ext = path.extname(filename).toLowerCase();
+
+//             let text = "";
+//             if (ext === '.docx') {
+//                 const result = await mammoth.extractRawText({ path: filePath });
+//                 text = result.value;
+//             } else if (ext === '.pdf') {
+//                 const dataBuffer = fs.readFileSync(filePath);
+//                 const result = await pdfParse(dataBuffer);
+//                 text = result.text;
+//             } else {
+//                 return res.status(400).json({ error: 'Unsupported file type. Only DOCX and PDF files are allowed.' });
+//             }
+
+//             const extractedData = await getJsonFromGemini(text);
+
+//             if (!extractedData) {
+//                 return res.status(500).json({ error: "Failed to extract data from CV" });
+//             }
+
+//             personalInformation = extractedData.personalInformation || personalInformation;
+//             about = extractedData.about || {};
+//             skills = extractedData.skills || [];
+//             projectExperience = extractedData.projectExperience || [];
+//             Qualification = extractedData.Qualification || [];
+//             workExperience = extractedData.workExperience || [];
+
+//             // **Generate extractText from structured data**
+//             extractText = generateExtractText({
+//                 personalInformation,
+//                 about,
+//                 skills,
+//                 projectExperience,
+//                 MicrosoftCertificates,
+//                 Qualification,
+//                 workExperience
+//             });
+//         }
+
+//         const newUser = new User({
+//             firstName,
+//             lastName,
+//             email,
+//             password: hashedPassword,
+//             contactNo,
+//             file: req.file ? req.file.path : null,
+//             personalInformation,
+//             about,
+//             skills,
+//             projectExperience,
+//             MicrosoftCertificates,
+//             Qualification,
+//             workExperience,
+//             extractText // **Use the generated extractText**
+//         });
+
+//         const userData = await newUser.save();
+//         const token = jwt.sign({ userId: userData._id }, process.env.JWT_SECRET);
+
+//         const code = generate4DigitCode();
+//         verificationCodes[email] = code;
+
+//         await transporter.sendMail({
+//             from: process.env.EMAIL_USER,
+//             to: email,
+//             subject: "Your Verification Code",
+//             text: `Your 4-digit verification code is: ${code}`
+//         });
+
+//         res.status(201).json({
+//             message: "User registered successfully. Verification code sent to email.",
+//             token,
+//             userData
+//         });
+
+//     } catch (e) {
+//         console.error(e);
+//         res.status(500).json({ error: e.message || "Internal Server Error" });
+//     }
+// });
+
+
+
+
+// without generateExtracttext function and directly to string format extracttext
+
+
+//  router.post('/register', upload.single('file'), async (req, res) => {
+//     try {
+//         const { firstName, lastName, email, password, contactNo } = req.body;
+
+//         if (!email || !password || !contactNo) {
+//             return res.status(400).json("Email, Password, and ContactNo are required");
+//         }
+
+//         const passwordCheck = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/;
+//         if (!passwordCheck.test(password)) {
+//             return res.status(400).json({
+//                 error: "Password must contain at least 1 uppercase letter, 1 lowercase letter, 1 digit, and 1 special character."
+//             });
+//         }
+
+//         const existingUser = await User.findOne({ email });
+//         if (existingUser) return res.status(409).json('Email already exists.');
+
+//         const hashedPassword = await bcrypt.hash(password, 10);
+
+//         let personalInformation = { };
+//         let about = {};
+//         let skills = [];
+//         let projectExperience = [];
+//         let MicrosoftCertificates = [];
+//         let Qualification = [];
+//         let workExperience = [];
+//         let extractText = "";
+
+//         if (req.file) {
+//             const { path: filePath, originalname: filename } = req.file;
+//             const ext = path.extname(filename).toLowerCase();
+
+//             let text = "";
+//             if (ext === '.docx') {
+//                 const result = await mammoth.extractRawText({ path: filePath });
+//                 text = result.value;
+//             } else if (ext === '.pdf') {
+//                 const dataBuffer = fs.readFileSync(filePath);
+//                 const result = await pdfParse(dataBuffer);
+//                 text = result.text;
+//             } else {
+//                 return res.status(400).json({ error: 'Unsupported file type. Only DOCX and PDF files are allowed.' });
+//             }
+
+//             const extractedData = await getJsonFromGemini(text);
+
+//             if (!extractedData) {
+//                 return res.status(500).json({ error: "Failed to extract data from CV" });
+//             }
+
+//             personalInformation = extractedData.personalInformation || personalInformation;
+//             about = extractedData.about || {};
+//             skills = extractedData.skills || [];
+//             projectExperience = extractedData.projectExperience || [];
+//             Qualification = extractedData.Qualification || [];
+//             workExperience = extractedData.workExperience || [];
+
+//             // **Store plain text in extractText without any formatting**
+//             extractText += `${personalInformation.firstName || ""} ${personalInformation.lastName || ""}\n`;
+//             extractText += `${personalInformation.email || ""} | ${personalInformation.contactNo || ""}\n`;
+//             extractText += `${about.linkedInURL || ""}\n\n`;
+
+//             extractText += `Professional Summary:\n${about.description || ""}\n\n`;
+//             extractText += `Skills: ${skills.join(", ")}\n\n`;
+
+//             if (workExperience.length) {
+//                 extractText += "Work Experience:\n";
+//                 workExperience.forEach(work => {
+//                     extractText += `${work.jobTitle} at ${work.companyName} (${work.startDate.year} - ${work.currentlyWorking ? "Present" : work.endDate.year})\n`;
+//                     extractText += `${work.description || ""}\n\n`;
+//                 });
+//             }
+
+//             if (Qualification.length) {
+//                 extractText += "Education:\n";
+//                 Qualification.forEach((edu, index) => {
+//                     extractText += `${index + 1}. ${edu.Degree} in ${edu.Field_of_study}, ${edu.UniversityName} (${edu.Start_month_year} - ${edu.End_month_year})\n\n`;
+//                 });
+//             }
+
+//             if (MicrosoftCertificates.length) {
+//                 extractText += "Certifications:\n";
+//                 MicrosoftCertificates.forEach(cert => {
+//                     extractText += `${cert.CertificateName} - ${cert.DateEarned}\n`;
+//                 });
+//                 extractText += "\n";
+//             }
+
+//             if (projectExperience.length) {
+//                 extractText += "Projects:\n";
+//                 projectExperience.forEach(proj => {
+//                     extractText += `${proj.projectName} (${proj.startDate} - ${proj.endDate})\n`;
+//                     extractText += `Tech Used: ${proj.technologiesUsed.join(", ")}\n`;
+//                     extractText += `${proj.description}\n\n`;
+//                 });
+//             }
+//         }
+
+//         const newUser = new User({
+//             firstName,
+//             lastName,
+//             email,
+//             password: hashedPassword,
+//             contactNo,
+//             file: req.file ? req.file.path : null,
+//             personalInformation,
+//             about,
+//             skills,
+//             projectExperience,
+//             MicrosoftCertificates,
+//             Qualification,
+//             workExperience,
+//             extractText: extractText.trim() // **Store plain string**
+//         });
+
+//         if (Array.isArray(about.microsoftDynamicsProduct)) {
+//             about.microsoftDynamicsProduct = about.microsoftDynamicsProduct.join(", ");
+//         }
+
+
+//         const userData = await newUser.save();
+//         const token = jwt.sign({ userId: userData._id }, process.env.JWT_SECRET);
+
+//         const code = generate4DigitCode();
+//         verificationCodes[email] = code;
+
+//         await transporter.sendMail({
+//             from: process.env.EMAIL_USER,
+//             to: email,
+//             subject: "Your Verification Code",
+//             text: `Your 4-digit verification code is: ${code}`
+//         });
+
+//         res.status(201).json({
+//             message: "User registered successfully. Verification code sent to email.",
+//             token,
+//             userData
+//         });
+
+//     } catch (e) {
+//         console.error(e);
+//         res.status(500).json({ error: e.message || "Internal Server Error" });
+//     }
+// });
+
+router.post('/register', upload.single('file'), async (req, res) => {
+    try {
+        const { firstName, lastName, email, password, contactNo } = req.body;
+
+        if (!email || !password || !contactNo) {
+            return res.status(400).json("Email, Password, and ContactNo are required");
+        }
+
+        const passwordCheck = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/;
+        if (!passwordCheck.test(password)) {
+            return res.status(400).json({
+                error: "Password must contain at least 1 uppercase letter, 1 lowercase letter, 1 digit, and 1 special character."
+            });
+        }
+
+        const existingUser = await User.findOne({ email });
+        if (existingUser) return res.status(409).json('Email already exists.');
+
+        const hashedPassword = await bcrypt.hash(password, 10);
+
+        let personalInformation = {};
+        let about = {};
+        let skills = [];
+        let projectExperience = [];
+        let MicrosoftCertificates = [];
+        let Qualification = [];
+        let workExperience = [];
+        let extractText = "";
+
+        if (req.file) {
+            const { path: filePath, originalname: filename } = req.file;
+            const ext = path.extname(filename).toLowerCase();
+
+            let text = "";
+            if (ext === '.docx') {
+                const result = await mammoth.extractRawText({ path: filePath });
+                text = result.value;
+            } else if (ext === '.pdf') {
+                const dataBuffer = fs.readFileSync(filePath);
+                const result = await pdfParse(dataBuffer);
+                text = result.text;
+            } else {
+                return res.status(400).json({ error: 'Unsupported file type. Only DOCX and PDF files are allowed.' });
+            }
+
+            const extractedData = await getJsonFromGemini(text);
+
+            if (!extractedData) {
+                return res.status(500).json({ error: "Failed to extract data from CV" });
+            }
+
+            personalInformation = extractedData.personalInformation || personalInformation;
+            about = extractedData.about || {};
+            skills = extractedData.skills || [];
+            projectExperience = extractedData.projectExperience || [];
+            Qualification = extractedData.Qualification || [];
+            workExperience = extractedData.workExperience || [];
+
+            // Normalize dates in workExperience
+            workExperience.forEach(work => {
+                if (work.startDate) {
+                    work.startDate = normalizeDate(work.startDate);
+                }
+                if (work.endDate) {
+                    work.endDate = normalizeDate(work.endDate);
+                }
+            });
+
+            // Normalize dates in Qualification
+            Qualification.forEach(edu => {
+                if (edu.Start_month_year) {
+                    edu.Start_month_year = normalizeDate(edu.Start_month_year);
+                }
+                if (edu.End_month_year) {
+                    edu.End_month_year = normalizeDate(edu.End_month_year);
+                }
+            });
+
+            // Normalize dates in projectExperience
+            projectExperience.forEach(proj => {
+                if (proj.startDate) {
+                    proj.startDate = normalizeDate(proj.startDate);
+                }
+                if (proj.endDate) {
+                    proj.endDate = normalizeDate(proj.endDate);
+                }
+            });
+
+            // **Store plain text in extractText without any formatting**
+            extractText += `${personalInformation.firstName || ""} ${personalInformation.lastName || ""}\n`;
+            extractText += `${personalInformation.email || ""} | ${personalInformation.contactNo || ""}\n`;
+            extractText += `${about.linkedInURL || ""}\n\n`;
+
+            extractText += `Professional Summary:\n${about.description || ""}\n\n`;
+            extractText += `Skills: ${skills.join(", ")}\n\n`;
+
+            if (workExperience.length) {
+                extractText += "Work Experience:\n";
+                workExperience.forEach(work => {
+                    extractText += `${work.jobTitle} at ${work.companyName} (${work.startDate} - ${work.currentlyWorking ? "Present" : work.endDate})\n`;
+                    extractText += `${work.description || ""}\n\n`;
+                });
+            }
+
+            if (Qualification.length) {
+                extractText += "Education:\n";
+                Qualification.forEach((edu, index) => {
+                    extractText += `${index + 1}. ${edu.Degree} in ${edu.Field_of_study}, ${edu.UniversityName} (${edu.Start_month_year} - ${edu.End_month_year})\n\n`;
+                });
+            }
+
+            if (MicrosoftCertificates.length) {
+                extractText += "Certifications:\n";
+                MicrosoftCertificates.forEach(cert => {
+                    extractText += `${cert.CertificateName} - ${cert.DateEarned}\n`;
+                });
+                extractText += "\n";
+            }
+
+            if (projectExperience.length) {
+                extractText += "Projects:\n";
+                projectExperience.forEach(proj => {
+                    extractText += `${proj.projectName} (${proj.startDate} - ${proj.endDate})\n`;
+                    extractText += `Tech Used: ${proj.technologiesUsed.join(", ")}\n`;
+                    extractText += `${proj.description}\n\n`;
+                });
+            }
+        }
+
+        const newUser = new User({
+            firstName,
+            lastName,
+            email,
+            password: hashedPassword,
+            contactNo,
+            file: req.file ? req.file.path : null,
+            personalInformation,
+            about,
+            skills,
+            projectExperience,
+            MicrosoftCertificates,
+            Qualification,
+            workExperience,
+            extractText: extractText.trim() // **Store plain string**
+        });
+
+        if (Array.isArray(about.microsoftDynamicsProduct)) {
+            about.microsoftDynamicsProduct = about.microsoftDynamicsProduct.join(", ");
+        }
+
+        const userData = await newUser.save();
+        const token = jwt.sign({ userId: userData._id }, process.env.JWT_SECRET);
+
+        const code = generate4DigitCode();
+        verificationCodes[email] = code;
+
+        await transporter.sendMail({
+            from: process.env.EMAIL_USER,
+            to: email,
+            subject: "Your Verification Code",
+            text: `Your 4-digit verification code is: ${code}`
+        });
+
+        res.status(201).json({
+            message: "User registered successfully. Verification code sent to email.",
+            token,
+            userData
+        });
+
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: e.message || "Internal Server Error" });
+    }
+});
+router.post('/verify-code', async (req, res) => {
+    const { email, code } = req.body;
+
+    if (!email || !code) return res.status(400).json('Email and code are required');
+
+    if (!verificationCodes[email] || verificationCodes[email] !== code) {
+        return res.status(400).json('Invalid verification code');
+    }
+
+    delete verificationCodes[email];
+    res.status(200).json('Verification successful');
+});
+
+
+//update personal info and store that in extractText field 
+router.put("/updatePersonalInfo", authenticateToken, async (req, res) => {
+    try {
+        const { personalInformation, about } = req.body;
+
+        // Validate required fields
+        if (
+            !personalInformation.firstName || personalInformation.firstName.trim() === "" ||
+            !personalInformation.lastName || personalInformation.lastName.trim() === "" ||
+            !personalInformation.email || personalInformation.email.trim() === "" ||
+            !personalInformation.contactNo || personalInformation.contactNo.trim() === "" ||
+            !personalInformation.city || personalInformation.city.trim() === "" ||
+            !personalInformation.state || personalInformation.state.trim() === "" ||
+            !personalInformation.country || personalInformation.country === ""
+        ) {
+            return res.status(400).send({ message: "All fields are required and cannot be empty." });
+        }
+
+        const user = await User.findById(req.user.userId);
+        if (!user) return res.status(404).send({ message: "User not found." });
+
+        // Update only personalInformation and about
+        user.personalInformation = personalInformation || user.personalInformation;
+        user.about = about || user.about;
+
+        // **Do not update or modify extractText**
+
+        const updatedUser = await user.save();
+        res.status(200).send({ message: "Personal Information updated", user: updatedUser });
+    } catch (error) {
+        res.status(500).send({ message: error.message || "Internal Server Error" });
+    }
+});
+
+
+
+//update about and store that in extractText field 
+router.put("/updateAbout", authenticateToken, async (req, res) => {
+    try {
+        const { about } = req.body;
+
+        // Validate about data
+        if (!about || typeof about !== "object") {
+            return res.status(400).send({ message: "Invalid or missing data for update." });
+        }
+
+        const user = await User.findById(req.user.userId);
+        if (!user) return res.status(404).send({ message: "User not found." });
+
+        // Update about information
+        user.about = { ...user.about, ...about };
+
+        // Update extractText field
+        // user.extractText = generateExtractText(user);
+
+        const updatedUser = await user.save();
+        res.status(200).send({ message: "About Information updated", user: updatedUser });
+    } catch (error) {
+        res.status(500).send({ message: error.message || "Internal Server Error" });
+    }
+});
+
+//update work expe and store that in extractText field 
+// router.put("/updateWorkExperience", authenticateToken, async (req, res) => {
+//     try {
+//         const { workExperience } = req.body;
+
+//         // Validate work experience data
+//         if (!workExperience || !Array.isArray(workExperience) || workExperience.length === 0) {
+//             return res.status(400).send({ message: "Invalid or missing work experience data." });
+//         }
+
+//         const user = await User.findById(req.user.userId);
+//         if (!user) return res.status(404).send({ message: "User not found." });
+
+//         // Convert existing work experience to a Map for quick lookup
+//         const workExperienceMap = new Map(user.workExperience.map(m => [m._id.toString(), m]));
+
+//         // Update or add work experience entries
+//         workExperience.forEach((newEntry) => {
+//             if (newEntry._id) {
+//                 const existingEntry = workExperienceMap.get(newEntry._id.toString());
+//                 if (existingEntry) {
+//                     Object.keys(newEntry).forEach((key) => {
+//                         existingEntry[key] = newEntry[key];
+//                     });
+//                 } else {
+//                     user.workExperience.push(newEntry);
+//                 }
+//             } else {
+//                 user.workExperience.push(newEntry);
+//             }
+//         });
+
+//         // Update extractText field
+//         // user.extractText = generateExtractText(user);
+
+//         const updatedUser = await user.save();
+//         res.status(200).send({ message: "Work Experience updated successfully", user: updatedUser });
+//     } catch (error) {
+//         res.status(500).send({ message: error.message || "Internal Server Error" });
+//     }
+// });
+router.put("/updateWorkExperience", authenticateToken, async (req, res) => {
+    try {
+        const { workExperience } = req.body;
+
+        // Validate work experience data
+        if (!workExperience || !Array.isArray(workExperience) || workExperience.length === 0) {
+            return res.status(400).send({ message: "Invalid or missing work experience data." });
+        }
+
+        // Validate and normalize dates in each work experience entry
+        for (const entry of workExperience) {
+            if (entry.startDate) {
+                entry.startDate = normalizeDate(entry.startDate);
+                if (!entry.startDate) {
+                    return res.status(400).send({ message: "Invalid start date format." });
+                }
+            }
+            if (entry.endDate) {
+                entry.endDate = normalizeDate(entry.endDate);
+                if (!entry.endDate) {
+                    return res.status(400).send({ message: "Invalid end date format." });
+                }
+            }
+        }
+
+        const user = await User.findById(req.user.userId);
+        if (!user) return res.status(404).send({ message: "User not found." });
+
+        // Convert existing work experience to a Map for quick lookup
+        const workExperienceMap = new Map(user.workExperience.map(m => [m._id.toString(), m]));
+
+        // Update or add work experience entries
+        workExperience.forEach((newEntry) => {
+            if (newEntry._id) {
+                const existingEntry = workExperienceMap.get(newEntry._id.toString());
+                if (existingEntry) {
+                    Object.keys(newEntry).forEach((key) => {
+                        existingEntry[key] = newEntry[key];
+                    });
+                } else {
+                    user.workExperience.push(newEntry);
+                }
+            } else {
+                user.workExperience.push(newEntry);
+            }
+        });
+
+        // Save the updated user document
+        const updatedUser = await user.save();
+        res.status(200).send({ message: "Work Experience updated successfully", user: updatedUser });
+    } catch (error) {
+        res.status(500).send({ message: error.message || "Internal Server Error" });
+    }
+});
+
+
+router.put("/updateWorkExperience/:WorkExperienceId", authenticateToken, async (req, res) => {
+    try {
+        const { WorkExperienceId } = req.params; // Get the WorkExperienceId from the URL
+        const updatedData = req.body; // Get the updated data from the request body
+
+        // Validate updatedData
+        if (
+            !updatedData.companyName || updatedData.companyName.trim() === "" ||
+            !updatedData.jobTitle || updatedData.jobTitle.trim() === "" ||
+            !updatedData.designation || updatedData.designation.trim() === "" ||
+            !updatedData.industryType || updatedData.industryType.trim() === "" ||
+            !updatedData.location || updatedData.location.trim() === "" ||
+            !updatedData.description || updatedData.description.trim() === "" ||
+            typeof updatedData.currentlyWorking !== "boolean" || // Check if it's a boolean
+            !updatedData.startDate || // Check if startDate exists
+            !updatedData.startDate.month || updatedData.startDate.month.trim() === "" || // Validate month
+            !updatedData.startDate.year || typeof updatedData.startDate.year !== "number" || // Validate year
+            !updatedData.endDate || // Check if endDate exists
+            !updatedData.endDate.month || updatedData.endDate.month.trim() === "" || // Validate month
+            !updatedData.endDate.year || typeof updatedData.endDate.year !== "number" // Validate year
+        ) {
+            return res.status(400).send({ message: "All fields are required, and currentlyWorking must be a boolean." });
+        }
+        // Find the user
+        const user = await User.findById(req.user.userId);
+        if (!user) return res.status(404).send({ message: "User not found." });
+
+        // Find the specific work experience entry in the workExperience array
+        const workExperienceToUpdate = user.workExperience.id(WorkExperienceId);
+        if (!workExperienceToUpdate) {
+            return res.status(404).send({ message: "Work experience not found." });
+        }
+
+        // Update the work experience fields
+        Object.assign(workExperienceToUpdate, updatedData);
+
+        // Update extractText field (if needed)
+        // user.extractText = generateExtractText(user);
+
+        // Save the updated user document
+        const updatedUser = await user.save();
+        res.status(200).send({ message: "Work experience updated successfully", user: updatedUser });
+    } catch (error) {
+        res.status(500).send({ message: error.message || "Internal Server Error" });
+    }
+});
+
+
+//update skills and store that in extractText field 
+router.put("/updateSkills", authenticateToken, async (req, res) => {
+    try {
+        let { skills } = req.body;
+
+        // Validate skills data
+        if (!skills) return res.status(400).send({ message: "Skills are required." });
+
+        // Ensure skills is an array
+        if (typeof skills === "string") {
+            try {
+                skills = JSON.parse(skills);
+            } catch (error) {
+                return res.status(400).send({ message: "Invalid skills format. Must be an array." });
+            }
+        }
+
+        if (!Array.isArray(skills)) {
+            return res.status(400).send({ message: "Skills should be an array." });
+        }
+
+        const user = await User.findById(req.user.userId);
+        if (!user) return res.status(404).send({ message: "User not found." });
+
+        // Update skills
+        user.skills = skills;
+
+        // Update extractText field
+        // user.extractText = generateExtractText(user);
+
+        const updatedUser = await user.save();
+        res.status(200).send({ message: "Skills updated successfully", user: updatedUser });
+    } catch (error) {
+        res.status(500).send({ message: error.message || "Internal Server Error" });
+    }
+});
+
+//update project info and store that in extractText field 
+router.put("/updateProject", authenticateToken, async (req, res) => {
+    try {
+        const { projectExperience } = req.body;
+
+        // Validate projectExperience data
+        if (!projectExperience || !Array.isArray(projectExperience) || projectExperience.length === 0) {
+            return res.status(400).send({ message: "Project experience must be a non-empty array." });
+        }
+
+        // Validate each project entry
+        for (const entry of projectExperience) {
+            if (
+                !entry.projectName || entry.projectName.trim() === "" ||
+                !entry.jobTitle || entry.jobTitle.trim() === "" ||
+                !entry.description || entry.description.trim() === "" ||
+                !entry.startDate || entry.startDate.trim() === "" ||
+                !entry.endDate || entry.endDate.trim() === "" ||
+                !Array.isArray(entry.technologiesUsed) || entry.technologiesUsed.length === 0 ||
+                entry.technologiesUsed.some(tech => typeof tech !== "string" || tech.trim() === "")
+            ) {
+                return res.status(400).send({ message: "All project fields are required and technologiesUsed must be a non-empty array of strings." });
+            }
+        }
+
+        const user = await User.findById(req.user.userId);
+        if (!user) return res.status(404).send({ message: "User not found." });
+
+        // Convert existing projects to a Map for quick lookup
+        const projectExperienceMap = new Map(user.projectExperience.map(p => [p._id.toString(), p]));
+
+        // Update or add project entries
+        projectExperience.forEach((newEntry) => {
+            if (newEntry._id) {
+                const existingEntry = projectExperienceMap.get(newEntry._id.toString());
+
+                if (existingEntry) {
+                    // Update all fields
+                    Object.keys(newEntry).forEach((key) => {
+                        existingEntry[key] = newEntry[key];
+                    });
+                } else {
+                    user.projectExperience.push(newEntry);
+                }
+            } else {
+                user.projectExperience.push(newEntry);
+            }
+        });
+
+        // Update extractText field
+        // user.extractText = generateExtractText(user);
+
+        const updatedUser = await user.save();
+        res.status(200).send({ message: "Project Information updated successfully", user: updatedUser });
+    } catch (error) {
+        res.status(500).send({ message: error.message || "Internal Server Error" });
+    }
+});
+
+router.put("/updateProject/:projectId", authenticateToken, async (req, res) => {
+    try {
+        const { projectId } = req.params; // Get the projectId from the URL
+        const updatedData = req.body;
+        // console.log(updatedData);
+        // Get the updated data from the request body
+
+        // Validate updatedData
+        if (
+            !updatedData.projectName || updatedData.projectName.trim() === "" ||
+            !updatedData.jobTitle || updatedData.jobTitle.trim() === "" ||
+            !updatedData.description || updatedData.description.trim() === "" ||
+            !updatedData.startDate || updatedData.startDate.trim() === "" ||
+            !updatedData.endDate || updatedData.endDate.trim() === "" ||
+            // !Array.isArray(entry.technologiesUsed) || entry.technologiesUsed.length === 0 ||
+            // entry.technologiesUsed.some(tech => typeof tech !== "string" || tech.trim() === "")
+            !Array.isArray(updatedData.technologiesUsed) || updatedData.technologiesUsed.length === 0 || updatedData.technologiesUsed.some(tech => typeof tech !== "string" || tech.trim() === "")
+        ) {
+            return res.status(400).send({ message: "All project fields are required and technologiesUsed must be a non-empty array of strings." });
+        }
+
+        // Find the user
+        const user = await User.findById(req.user.userId);
+        if (!user) return res.status(404).send({ message: "User not found." });
+
+        // Find the specific project in the projectExperience array
+        const projectToUpdate = user.projectExperience.id(projectId);
+        if (!projectToUpdate) {
+            return res.status(404).send({ message: "Project not found." });
+        }
+
+        // Update the project fields
+        Object.assign(projectToUpdate, updatedData);
+
+        // Update extractText field (if needed)
+        // user.extractText = generateExtractText(user);
+
+        // Save the updated user document
+        const updatedUser = await user.save();
+        res.status(200).send({ message: "Project updated successfully", user: updatedUser });
+    } catch (error) {
+        res.status(500).send({ message: error.message || "Internal Server Error" });
+    }
+});
+
+
+// router.put("/updateProject", authenticateToken, async (req, res) => {
+//     try {
+//         const { projectExperience } = req.body;
+
+//         // Validate projectExperience data
+//         if (!projectExperience || !Array.isArray(projectExperience) || projectExperience.length === 0) {
+//             return res.status(400).send({ message: "Project experience must be a non-empty array." });
+//         }
+
+//         // Validate each project entry
+//         for (const entry of projectExperience) {
+//             if (
+//                 !entry.projectName || entry.projectName.trim() === "" ||
+//                 !entry.jobTitle || entry.jobTitle.trim() === "" ||
+//                 !entry.description || entry.description.trim() === "" ||
+//                 !entry.startDate || entry.startDate.trim() === "" ||
+//                 !entry.endDate || entry.endDate.trim() === "" ||
+//                 !Array.isArray(entry.technologiesUsed) || entry.technologiesUsed.length === 0 ||
+//                 entry.technologiesUsed.some(tech => typeof tech !== "string" || tech.trim() === "")
+//             ) {
+//                 return res.status(400).send({ message: "All project fields are required and technologiesUsed must be a non-empty array of strings." });
+//             }
+//         }
+
+//         const user = await User.findById(req.user.userId);
+//         if (!user) return res.status(404).send({ message: "User not found." });
+
+//         // Add new projects
+//         user.projectExperience.push(...projectExperience);
+
+//         // Update extractText field
+//         user.extractText = generateExtractText(user);
+
+//         const updatedUser = await user.save();
+//         res.status(200).send({ message: "Projects added successfully", user: updatedUser });
+//     } catch (error) {
+//         res.status(500).send({ message: error.message || "Internal Server Error" });
+//     }
+// });
+
+// router.put("/updateProject/:id", authenticateToken, async (req, res) => {
+//     try {
+//         const { id } = req.params; // Project ID to update
+//         const { projectName, jobTitle, description, technologiesUsed, startDate, endDate } = req.body;
+
+//         // Validate required fields
+//         if (
+//             !projectName || projectName.trim() === "" ||
+//             !jobTitle || jobTitle.trim() === "" ||
+//             !description || description.trim() === "" ||
+//             !startDate || startDate.trim() === "" ||
+//             !endDate || endDate.trim() === "" ||
+//             !Array.isArray(technologiesUsed) || technologiesUsed.length === 0 ||
+//             technologiesUsed.some(tech => typeof tech !== "string" || tech.trim() === "")
+//         ) {
+//             return res.status(400).send({ message: "All project fields are required and technologiesUsed must be a non-empty array of strings." });
+//         }
+
+//         const user = await User.findById(req.user.userId);
+//         if (!user) return res.status(404).send({ message: "User not found." });
+
+//         // Find the project to update
+//         const projectToUpdate = user.projectExperience.id(id);
+//         if (!projectToUpdate) {
+//             return res.status(404).send({ message: "Project not found." });
+//         }
+
+//         // Update the project fields
+//         projectToUpdate.projectName = projectName;
+//         projectToUpdate.jobTitle = jobTitle;
+//         projectToUpdate.description = description;
+//         projectToUpdate.technologiesUsed = technologiesUsed;
+//         projectToUpdate.startDate = startDate;
+//         projectToUpdate.endDate = endDate;
+
+//         // Update extractText field
+//         user.extractText = generateExtractText(user);
+
+//         const updatedUser = await user.save();
+//         res.status(200).send({ message: "Project updated successfully", user: updatedUser });
+//     } catch (error) {
+//         res.status(500).send({ message: error.message || "Internal Server Error" });
+//     }
+// });
+
+//update qualification and store that in extractText field 
+
+
+// router.put("/updateQualifications", authenticateToken, async (req, res) => {
+//     try {
+//         const { Qualification } = req.body;
+
+//         // Validate Qualification data
+//         if (!Qualification || !Array.isArray(Qualification) || Qualification.length === 0) {
+//             return res.status(400).send({ message: "No valid education data provided." });
+//         }
+
+//         // Validate each Qualification entry
+//         for (const entry of Qualification) {
+//             if (
+//                 !entry.UniversityName || entry.UniversityName.trim() === "" ||
+//                 !entry.Degree || entry.Degree.trim() === "" ||
+//                 !entry.Field_of_study || entry.Field_of_study.trim() === "" ||
+//                 !entry.Start_month_year || entry.Start_month_year.trim() === "" ||
+//                 !entry.End_month_year || entry.End_month_year.trim() === "" ||
+//                 !entry.description || entry.description.trim() === ""
+//             ) {
+//                 return res.status(400).send({ message: "All Qualification fields are required and cannot be empty." });
+//             }
+//         }
+
+//         const user = await User.findById(req.user.userId);
+//         if (!user) return res.status(404).send({ message: "User not found." });
+
+//         // Convert existing qualifications to a Map for quick lookup
+//         const qualificationMap = new Map(user.Qualification.map(q => [q._id.toString(), q]));
+
+//         // Update or add qualification entries
+//         Qualification.forEach((newEntry) => {
+//             if (newEntry._id) {
+//                 const existingEntry = qualificationMap.get(newEntry._id.toString());
+
+//                 if (existingEntry) {
+//                     // Update all fields
+//                     Object.keys(newEntry).forEach((key) => {
+//                         existingEntry[key] = newEntry[key];
+//                     });
+//                 } else {
+//                     user.Qualification.push(newEntry);
+//                 }
+//             } else {
+//                 user.Qualification.push(newEntry);
+//             }
+//         });
+
+//         // Update extractText field
+//         // user.extractText = generateExtractText(user);
+
+//         const updatedUser = await user.save();
+//         res.status(200).send({ message: "Qualification updated successfully", user: updatedUser });
+//     } catch (error) {
+//         res.status(500).send({ message: error.message || "Internal Server Error" });
+//     }
+// });
+
+router.put("/updateQualifications", authenticateToken, async (req, res) => {
+    try {
+        const { Qualification } = req.body;
+
+        // Validate Qualification data
+        if (!Qualification || !Array.isArray(Qualification) || Qualification.length === 0) {
+            return res.status(400).send({ message: "No valid education data provided." });
+        }
+
+        // Validate and normalize dates in each Qualification entry
+        for (const entry of Qualification) {
+            if (entry.Start_month_year) {
+                entry.Start_month_year = normalizeDate(entry.Start_month_year);
+                if (!entry.Start_month_year) {
+                    return res.status(400).send({ message: "Invalid start date format." });
+                }
+            }
+            if (entry.End_month_year) {
+                entry.End_month_year = normalizeDate(entry.End_month_year);
+                if (!entry.End_month_year) {
+                    return res.status(400).send({ message: "Invalid end date format." });
+                }
+            }
+        }
+
+        const user = await User.findById(req.user.userId);
+        if (!user) return res.status(404).send({ message: "User not found." });
+
+        // Convert existing qualifications to a Map for quick lookup
+        const qualificationMap = new Map(user.Qualification.map(q => [q._id.toString(), q]));
+
+        // Update or add qualification entries
+        Qualification.forEach((newEntry) => {
+            if (newEntry._id) {
+                const existingEntry = qualificationMap.get(newEntry._id.toString());
+
+                if (existingEntry) {
+                    // Update all fields
+                    Object.keys(newEntry).forEach((key) => {
+                        existingEntry[key] = newEntry[key];
+                    });
+                } else {
+                    user.Qualification.push(newEntry);
+                }
+            } else {
+                user.Qualification.push(newEntry);
+            }
+        });
+
+        // Save the updated user document
+        const updatedUser = await user.save();
+        res.status(200).send({ message: "Qualification updated successfully", user: updatedUser });
+    } catch (error) {
+        res.status(500).send({ message: error.message || "Internal Server Error" });
+    }
+});
+
+router.put("/updateQualification/:QualificationId", authenticateToken, async (req, res) => {
+    try {
+        const { QualificationId } = req.params;
+        console.log(QualificationId);
+
+        const entry = req.body;
+
+        if (
+            !entry.UniversityName || entry.UniversityName.trim() === "" ||
+            !entry.Degree || entry.Degree.trim() === "" ||
+            !entry.Field_of_study || entry.Field_of_study.trim() === "" ||
+            !entry.Start_month_year || entry.Start_month_year.trim() === "" ||
+            !entry.End_month_year || entry.End_month_year.trim() === "" ||
+            !entry.description || entry.description.trim() === "") {
+            return res.status(400).send({
+                message: "All Qualification fields are required and technologiesUsed must be a non-empty array of strings."
+
+            })
+        }
+
+        const user = await User.findById(req.user.userId);
+        if (!user) return res.status(404).send({ message: "User not found." });
+
+        // Find the specific project in the projectExperience array
+        const QualificationToUpdate = user.Qualification.id(QualificationId);
+        if (!QualificationToUpdate) {
+            return res.status(404).send({ message: "Qualification not found." });
+        }
+
+        // Update the Qualification fields
+        Object.assign(QualificationToUpdate, entry);
+
+        // Update extractText field (if needed)
+        // user.extractText = generateExtractText(user);
+
+        // Save the updated user document
+        const updatedUser = await user.save();
+        res.status(200).send({ message: "Qualification updated successfully", user: updatedUser });
+
+
+    } catch (err) {
+        res.status(500).send({ message: err.message || "Internal Server Error" });
+    }
+
+
+});
+
+//update Microsoft certi with _id and store in extractText field and db
+router.put('/updateMicrosoftCertificate', authenticateToken, async (req, res) => {
+    try {
+        const { MicrosoftCertificates } = req.body;
+
+        // Validate MicrosoftCertificates data
+        if (!MicrosoftCertificates || !Array.isArray(MicrosoftCertificates)) {
+            return res.status(400).send({ message: "Invalid or missing Microsoft Certificate data." });
+        }
+
+        // Validate each certificate entry
+        for (const entry of MicrosoftCertificates) {
+            if (
+                !entry.CertificateName || entry.CertificateName.trim() === "" ||
+                !entry.DateEarned || entry.DateEarned.trim() === "" ||
+                !entry.ValidityDate || entry.ValidityDate.trim() === "" ||
+                !entry.certificateURL || entry.certificateURL.trim() === "" ||
+                !entry.description || entry.description.trim() === ""
+            ) {
+                return res.status(400).send({ message: "All Microsoft Certificate fields are required and cannot be empty." });
+            }
+        }
+
+        // Find user in the database
+        const user = await User.findById(req.user.userId);
+        if (!user) return res.status(404).send({ message: "User not found." });
+
+        // Convert existing certificates to a Map for quick lookup
+        const MicrosoftCertificatesMap = new Map(user.MicrosoftCertificates.map(m => [m._id.toString(), m]));
+
+        // Update or add certificate entries
+        MicrosoftCertificates.forEach((newEntry) => {
+            if (newEntry._id) {
+                const existingEntry = MicrosoftCertificatesMap.get(newEntry._id.toString());
+
+                if (existingEntry) {
+                    // Update all fields
+                    Object.keys(newEntry).forEach((key) => {
+                        existingEntry[key] = newEntry[key];
+                    });
+                } else {
+                    user.MicrosoftCertificates.push(newEntry);
+                }
+            } else {
+                user.MicrosoftCertificates.push(newEntry);
+            }
+        });
+
+        // Update extractText field
+        // user.extractText = generateExtractText(user);
+
+        // Save updated user data
+        const updatedUser = await user.save();
+        res.status(200).send({ message: "Microsoft Certifications updated", user: updatedUser });
+    } catch (error) {
+        res.status(500).send({ message: error.message || "Internal Server Error" });
+    }
+});
+
+router.put("/updateMicrosoftCertificate/:MicrosoftCertificateId", authenticateToken, async (req, res) => {
+    try {
+        const { MicrosoftCertificateId } = req.params; // Get the projectId from the URL
+        // console.log(MicrosoftCertificateId);
+
+        const updatedData = req.body;
+        // console.log(updatedData);
+        // Get the updated data from the request body
+
+        // Validate updatedData
+        if (
+            !updatedData.CertificateName || updatedData.CertificateName.trim() === "" ||
+            !updatedData.DateEarned || updatedData.DateEarned.trim() === "" ||
+            !updatedData.ValidityDate || updatedData.ValidityDate.trim() === "" ||
+            !updatedData.certificateURL || updatedData.certificateURL.trim() === "" ||
+            !updatedData.description || updatedData.description.trim() === ""
+        )
+        // !Array.isArray(entry.technologiesUsed) || entry.technologiesUsed.length === 0 ||
+        // entry.technologiesUsed.some(tech => typeof tech !== "string" || tech.trim() === "")
+        {
+            return res.status(400).send({ message: "All project fields are required and technologiesUsed must be a non-empty array of strings." });
+        }
+
+        // Find the user
+        const user = await User.findById(req.user.userId);
+        if (!user) return res.status(404).send({ message: "User not found." });
+
+        // Find the specific project in the projectExperience array
+        const MicrosoftCertificateToUpdate = user.MicrosoftCertificates.id(MicrosoftCertificateId);
+        if (!MicrosoftCertificateToUpdate) {
+            return res.status(404).send({ message: "MicrosoftCertificate not found." });
+        }
+
+        // Update the project fields
+        Object.assign(MicrosoftCertificateToUpdate, updatedData);
+
+        // Update extractText field (if needed)
+        // user.extractText = generateExtractText(user);
+
+        // Save the updated user document
+        const updatedUser = await user.save();
+        res.status(200).send({ message: "Project updated successfully", user: updatedUser });
+    } catch (error) {
+        res.status(500).send({ message: error.message || "Internal Server Error" });
+    }
+});
+
+
+//to upload CV when user is not uploaded cv at registration
+// router.put('/upload-cv', authenticateToken, upload.single('file'), async (req, res) => {
+//     try {
+//         if (!req.file) {
+//             return res.status(400).json({ error: "No file uploaded" });
+//         }
+
+//         const userId = req.user.userId; // Extract user ID from JWT token
+//         const user = await User.findById(userId);
+//         if (!user) return res.status(404).json({ error: "User not found" });
+
+//         const { path: filePath, originalname: filename } = req.file;
+//         const ext = path.extname(filename).toLowerCase();
+
+//         // Extract text from uploaded CV
+//         let text = "";
+//         if (ext === '.docx') {
+//             text = (await mammoth.extractRawText({ path: filePath })).value;
+//         } else if (ext === '.pdf') {
+//             text = (await pdfParse(fs.readFileSync(filePath))).text;
+//         } else {
+//             return res.status(400).json({ error: 'Unsupported file type. Only DOCX and PDF files are allowed.' });
+//         }
+
+//         // Extract JSON data from CV using AI model
+//         let extractedData = await getJsonFromGemini(text);
+//         if (!extractedData || typeof extractedData !== 'object') {
+//             console.error("Error: Extracted data is not valid!", extractedData);
+//             return res.status(500).json({ error: "Failed to extract data from CV" });
+//         }
+
+
+
+//         // Handle nested structure in extracted data
+//         extractedData = extractedData.data && typeof extractedData.data === 'object' ? extractedData.data : extractedData;
+
+//         // **Update User Information**
+//         user.file = req.file.path;
+//         user.extractText = text.trim(); // Save extracted text from CV
+
+//         user.personalInformation = {
+//             firstName: extractedData.personalInformation?.firstName ?? user.firstName,
+//             lastName: extractedData.personalInformation?.lastName ?? user.lastName,
+//             email: extractedData.personalInformation?.email ?? user.email,
+//             contactNo: extractedData.personalInformation?.contactNo ?? user.contactNo,
+//             city: extractedData.personalInformation?.city ?? user.personalInformation?.city ?? null,
+//             state: extractedData.personalInformation?.state ?? user.personalInformation?.state ?? null,
+//             country: extractedData.personalInformation?.country ?? user.personalInformation?.country ?? null,
+//         };
+
+//         user.about = {
+//             description: extractedData.about?.description ?? user.about?.description ?? null,
+//             linkedInURL: extractedData.about?.linkedInURL ?? user.about?.linkedInURL ?? null,
+//             professionalTitle: extractedData.about?.professionalTitle ?? user.about?.professionalTitle ?? null,
+//             primaryRole: extractedData.about?.primaryRole ?? user.about?.primaryRole ?? null,
+//             microsoftDynamicsExpertise: extractedData.about?.microsoftDynamicsExpertise ?? user.about?.microsoftDynamicsExpertise ?? null,
+//             microsoftDynamicsProduct: extractedData.about?.microsoftDynamicsProduct ?? user.about?.microsoftDynamicsProduct ?? null,
+//             yearsOfExperience: extractedData.about?.yearsOfExperience ?? user.about?.yearsOfExperience ?? null,
+//         };
+
+//         user.skills = extractedData.skills?.length ? extractedData.skills : user.skills;
+
+//         user.projectExperience = extractedData.projectExperience?.map(proj => ({
+//             projectName: proj.projectName || null,
+//             jobTitle: proj.jobTitle || null,
+//             description: proj.description || null,
+//             technologiesUsed: proj.technologiesUsed || [],
+//             startDate: proj.startDate || null,
+//             endDate: proj.endDate || null,
+//         })) ?? user.projectExperience;
+
+//         user.MicrosoftCertificates = extractedData.MicrosoftCertificates?.map(cert => ({
+//             CertificateName: cert.CertificateName || null,
+//             DateEarned: cert.DateEarned || null,
+//             ValidityDate: cert.ValidityDate || null,
+//             certificateURL: cert.certificateURL || null,
+//             description: cert.description || null,
+//         })) ?? user.MicrosoftCertificates;
+
+//         user.Qualification = extractedData.Qualification?.map(edu => ({
+//             UniversityName: edu.UniversityName || null,
+//             Degree: edu.Degree || null,
+//             Field_of_study: edu.Field_of_study || null,
+//             Start_month_year: edu.Start_month_year || null,
+//             End_month_year: edu.End_month_year || null,
+//             description: edu.description || null,
+//         })) ?? user.Qualification;
+
+//         user.workExperience = extractedData.workExperience?.map(exp => ({
+//             companyName: exp.companyName || null,
+//             jobTitle: exp.jobTitle || null,
+//             designation: exp.designation || null,
+//             industryType: exp.industryType || null,
+//             location: exp.location || null,
+//             currentlyWorking: exp.currentlyWorking ?? false,
+//             startDate: exp.startDate ? { month: exp.startDate?.month, year: exp.startDate?.year } : null,
+//             endDate: exp.endDate ? { month: exp.endDate?.month, year: exp.endDate?.year } : null,
+//             description: exp.description || null,
+//         })) ?? user.workExperience;
+
+//         await user.save();
+
+//         res.status(200).json({
+//             message: "CV uploaded and data updated successfully.",
+//             extractedData,
+//             personalInformation: user.personalInformation,
+//             about: user.about,
+//             skills: user.skills,
+//             projectExperience: user.projectExperience,
+//             MicrosoftCertificates: user.MicrosoftCertificates,
+//             Qualification: user.Qualification,
+//             workExperience: user.workExperience,
+//             extractText: user.extractText
+//         });
+
+//     } catch (error) {
+//         console.error(error);
+//         res.status(500).json({ error: "Internal Server Error" });
+//     }
+// });
+
+
+router.put('/upload-cv', authenticateToken, upload.single('file'), async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ error: "No file uploaded" });
+        }
+
+        const userId = req.user.userId; // Extract user ID from JWT token
+        const user = await User.findById(userId);
+        if (!user) return res.status(404).json({ error: "User not found" });
+
+        const { path: filePath, originalname: filename } = req.file;
+        const ext = path.extname(filename).toLowerCase();
+
+        let text = "";
+        if (ext === '.docx') {
+            const result = await mammoth.extractRawText({ path: filePath });
+            text = result.value;
+        } else if (ext === '.pdf') {
+            const dataBuffer = fs.readFileSync(filePath);
+            const result = await pdfParse(dataBuffer);
+            text = result.text;
+        } else {
+            return res.status(400).json({ error: 'Unsupported file type. Only DOCX and PDF files are allowed.' });
+        }
+
+        // **Extract data from CV using Gemini AI**
+        let extractedData = await getJsonFromGemini(text);
+
+        // Ensure extractedData is an object
+        if (!extractedData || typeof extractedData !== 'object') {
+            console.error("Error: Extracted data is not an object!", extractedData);
+            return res.status(500).json({ error: "Failed to extract data from CV" });
+        }
+
+        // Handle potential nested structure in the response
+        if (extractedData.data && typeof extractedData.data === 'object') {
+            extractedData = extractedData.data;
+        }
+
+        console.log("Final Extracted Data:", extractedData);
+
+        // **Update personal information**
+        const personalInformation = {
+            firstName: extractedData.personalInformation?.firstName ?? user.firstName,
+            lastName: extractedData.personalInformation?.lastName ?? user.lastName,
+            email: extractedData.personalInformation?.email ?? user.email,
+            contactNo: extractedData.personalInformation?.contactNo ?? user.contactNo,
+            city: extractedData.personalInformation?.city ?? null,
+            state: extractedData.personalInformation?.state ?? null,
+            country: extractedData.personalInformation?.country ?? null,
+        };
+
+        // **Update About Section**
+        const about = {
+            description: extractedData.about?.description ?? null,
+            linkedInURL: extractedData.about?.linkedInURL ?? null,
+            professionalTitle: extractedData.about?.professionalTitle ?? null,
+            primaryRole: extractedData.about?.primaryRole ?? null,
+            microsoftDynamicsExpertise: extractedData.about?.microsoftDynamicsExpertise ?? null,
+            microsoftDynamicsProduct: extractedData.about?.microsoftDynamicsProduct ?? null,
+            yearsOfExperience: extractedData.about?.yearsOfExperience ?? null,
+        };
+
+        // **Update Skills**
+        const skills = extractedData.skills || [];
+
+        // **Update Project Experience**
+        const projectExperience = extractedData.projectExperience ? extractedData.projectExperience.map(proj => ({
+            projectName: proj.projectName || null,
+            jobTitle: proj.jobTitle || null,
+            description: proj.description || null,
+            technologiesUsed: proj.technologiesUsed || [],
+            startDate: proj.startDate || null,
+            endDate: proj.endDate || null,
+        })) : [];
+
+        // **Update Microsoft Certifications**
+        const MicrosoftCertificates = extractedData.MicrosoftCertificates ? extractedData.MicrosoftCertificates.map(cert => ({
+            CertificateName: cert.CertificateName || null,
+            DateEarned: cert.DateEarned || null,
+            ValidityDate: cert.ValidityDate || null,
+            certificateURL: cert.certificateURL || null,
+            description: cert.description || null,
+        })) : [];
+
+        // **Update Educational Qualifications**
+        const Qualification = extractedData.Qualification ? extractedData.Qualification.map(edu => ({
+            UniversityName: edu.UniversityName || null,
+            Degree: edu.Degree || null,
+            Field_of_study: edu.Field_of_study || null,
+            Start_month_year: edu.Start_month_year || null,
+            End_month_year: edu.End_month_year || null,
+            description: edu.description || null,
+        })) : [];
+
+        // **Update Work Experience**
+        const workExperience = extractedData.workExperience ? extractedData.workExperience.map(exp => ({
+            companyName: exp.companyName || null,
+            jobTitle: exp.jobTitle || null,
+            designation: exp.designation || null,
+            industryType: exp.industryType || null,
+            location: exp.location || null,
+            currentlyWorking: exp.currentlyWorking || false,
+            startDate: {
+                month: exp.startDate?.month || null,
+                year: exp.startDate?.year || null
+            },
+            endDate: {
+                month: exp.endDate?.month || null,
+                year: exp.endDate?.year || null
+            },
+            description: exp.description || null,
+        })) : [];
+
+        // **Update extractText field with the plain text from the CV**
+        const extractText = text.trim();
+
+        // **Update User Document in Database**
+        user.file = req.file.path;
+        user.extractedData = extractedData;
+        user.personalInformation = personalInformation;
+        user.about = about;
+        user.skills = skills;
+        user.projectExperience = projectExperience;
+        user.MicrosoftCertificates = MicrosoftCertificates;
+        user.Qualification = Qualification;
+        user.workExperience = workExperience;
+        user.extractText = extractText; // Update extractText field
+
+        await user.save();
+
+        res.status(200).json({
+            message: "CV uploaded successfully and extracted data updated.",
+            extractedData,
+            personalInformation,
+            about,
+            skills,
+            projectExperience,
+            MicrosoftCertificates,
+            Qualification,
+            workExperience,
+            extractText // Include extractText in the response
+        });
+
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: "Internal Server Error" });
+    }
+});
+
+
+// search CV function wuth keyword except date and time
+router.get('/search', async (req, res) => {
+    try {
+        const { keyword } = req.query;
+
+        // Validate keyword
+        if (!keyword || typeof keyword !== "string" || keyword.trim() === "") {
+            return res.status(400).json({ message: "Keyword is required and must be a non-empty string." });
+        }
+
+        // Define the search query
+        const searchQuery = {
+            $or: [
+                { firstName: { $regex: keyword, $options: 'i' } }, // Case-insensitive search
+                { lastName: { $regex: keyword, $options: 'i' } },
+                { email: { $regex: keyword, $options: 'i' } },
+                { contactNo: { $regex: keyword, $options: 'i' } },
+                { 'personalInformation.firstName': { $regex: keyword, $options: 'i' } },
+                { 'personalInformation.lastName': { $regex: keyword, $options: 'i' } },
+                { 'personalInformation.email': { $regex: keyword, $options: 'i' } },
+                { 'personalInformation.contactNo': { $regex: keyword, $options: 'i' } },
+                { 'personalInformation.city': { $regex: keyword, $options: 'i' } },
+                { 'personalInformation.state': { $regex: keyword, $options: 'i' } },
+                { 'personalInformation.country': { $regex: keyword, $options: 'i' } },
+                { 'about.description': { $regex: keyword, $options: 'i' } },
+                { 'about.linkedInURL': { $regex: keyword, $options: 'i' } },
+                { 'about.professionalTitle': { $regex: keyword, $options: 'i' } },
+                { 'about.primaryRole': { $regex: keyword, $options: 'i' } },
+                { 'about.microsoftDynamicsExpertise': { $regex: keyword, $options: 'i' } },
+                { 'about.microsoftDynamicsProduct': { $regex: keyword, $options: 'i' } },
+                { 'skills': { $regex: keyword, $options: 'i' } },
+                { 'projectExperience.projectName': { $regex: keyword, $options: 'i' } },
+                { 'projectExperience.jobTitle': { $regex: keyword, $options: 'i' } },
+                { 'projectExperience.description': { $regex: keyword, $options: 'i' } },
+                { 'projectExperience.technologiesUsed': { $regex: keyword, $options: 'i' } },
+                { 'MicrosoftCertificates.CertificateName': { $regex: keyword, $options: 'i' } },
+                { 'MicrosoftCertificates.description': { $regex: keyword, $options: 'i' } },
+                { 'Qualification.UniversityName': { $regex: keyword, $options: 'i' } },
+                { 'Qualification.Degree': { $regex: keyword, $options: 'i' } },
+                { 'Qualification.Field_of_study': { $regex: keyword, $options: 'i' } },
+                { 'Qualification.description': { $regex: keyword, $options: 'i' } },
+                { 'workExperience.companyName': { $regex: keyword, $options: 'i' } },
+                { 'workExperience.jobTitle': { $regex: keyword, $options: 'i' } },
+                { 'workExperience.designation': { $regex: keyword, $options: 'i' } },
+                { 'workExperience.industryType': { $regex: keyword, $options: 'i' } },
+                { 'workExperience.location': { $regex: keyword, $options: 'i' } },
+                { 'workExperience.description': { $regex: keyword, $options: 'i' } },
+                { 'extractText': { $regex: keyword, $options: 'i' } } // Search in the extracted text
+            ]
+        };
+
+        // Perform the search
+        const users = await User.find(searchQuery).select('-password -file');
+
+        if (users.length === 0) {
+            return res.status(404).json({ message: "No users found with the given keyword." });
+        }
+
+        res.status(200).json({ message: "Search results", users });
+    } catch (error) {
+        console.error("Search Error:", error);
+        res.status(500).json({ message: error.message || "Internal Server Error" });
+    }
+});
+
+// function to generate pdf from database data
+// const generateCV = async (userId) => {
+//     try {
+//         const user = await User.findById(userId).select("-password -extractedData -file");
+//         if (!user) {
+//             throw new Error("User not found");
+//         }
+
+//         const pdfDir = path.join(__dirname, "../public/pdfs");
+//         if (!fs.existsSync(pdfDir)) {
+//             fs.mkdirSync(pdfDir, { recursive: true });
+//         }
+
+//         const pdfPath = path.join(pdfDir, `${user._id}_CV.pdf`);
+//         const doc = new PDFDocument({ size: "A4", margin: 50 });
+//         const writeStream = fs.createWriteStream(pdfPath);
+//         doc.pipe(writeStream);
+
+//         // **Header (Name, Contact, LinkedIn, Email)**
+//         doc.fontSize(20).text(`${user.personalInformation.firstName || ""} ${user.personalInformation.lastName || ""}`, { align: "center" });
+//         doc.fontSize(12).text(`${user.personalInformation.email || ""} | ${user.personalInformation.contactNo || ""}`, { align: "center" });
+//         doc.fontSize(12).fillColor("blue").text(user.about.linkedInURL || "", { align: "center", link: user.about.linkedInURL || "" });
+//         doc.moveDown();
+
+//         // **Professional Summary**
+//         if (user.about.description) {
+//             doc.fontSize(14).fillColor("black").text("Professional Summary", { underline: true }).moveDown(0.3);
+//             doc.fontSize(11).text(user.about.description).moveDown();
+//         }
+
+//         // **Skills** (Limited to 6)
+//         if (user.skills.length) {
+//             doc.fontSize(14).fillColor("black").text("Skills", { underline: true }).moveDown(0.3);
+//             doc.fontSize(11).text(user.skills.slice(0, 6).join(", ")).moveDown();
+//         }
+
+//         // **Work Experience** (Show only last 2 jobs)
+//         if (user.workExperience.length) {
+//             doc.fontSize(14).fillColor("black").text("Work Experience", { underline: true }).moveDown(0.3);
+//             user.workExperience.slice(0, 2).forEach((work) => {
+//                 doc.fontSize(12).text(`${work.jobTitle} at ${work.companyName} (${work.startDate.year} - ${work.currentlyWorking ? "Present" : work.endDate.year})`);
+//                 if (work.description) {
+//                     doc.fontSize(11).text(work.description, { lineGap: 3 });
+//                 }
+//                 doc.moveDown();
+//             });
+//         }
+
+//         // **Education** (Show only highest qualification)
+//         // if (user.Qualification.length) {
+//         //     doc.fontSize(14).fillColor("black").text("Educationnn", { underline: true }).moveDown(0.3);
+//         //     const highestEdu = user.Qualification.slice(0, 1);
+//         //     highestEdu.forEach((edu) => {
+//         //         doc.fontSize(12).text(`${edu.Degree} in ${edu.Field_of_study}, ${edu.UniversityName} (${edu.Start_month_year} - ${edu.End_month_year})`);
+//         //         doc.moveDown();
+//         //     });
+//         // }
+
+//         if (user.Qualification && user.Qualification.length > 0) {
+//             doc.fontSize(14).fillColor("black").text("Education", { underline: true }).moveDown(0.3);
+
+//             user.Qualification.forEach((edu, index) => {
+//                 // console.log(`Processing Education Entry ${index + 1}:`, edu); // Debugging
+
+//                 const degree = edu.Degree || "N/A";
+//                 const field = edu.Field_of_study || "N/A";
+//                 const university = edu.UniversityName || "N/A";
+//                 const startDate = edu.Start_month_year ? edu.Start_month_year : "Unknown";
+//                 const endDate = edu.End_month_year ? edu.End_month_year : "Unknown";
+
+//                 doc.fontSize(12).text(`${index + 1}. ${degree} in ${field}, ${university} (${startDate} - ${endDate})`);
+//                 doc.moveDown(); // Ensures proper spacing
+//             });
+//         }
+
+//         // **Certifications** (Show max 2)
+//         if (user.MicrosoftCertificates.length) {
+//             doc.fontSize(14).fillColor("black").text("Certifications", { underline: true }).moveDown(0.3);
+//             user.MicrosoftCertificates.slice(0, 2).forEach((cert) => {
+//                 doc.fontSize(12).text(`${cert.CertificateName} - ${cert.DateEarned}`);
+//             });
+//             doc.moveDown();
+//         }
+
+//         // **Projects** (Show only 1 project)
+//         if (user.projectExperience.length) {
+//             doc.fontSize(14).fillColor("black").text("Projects", { underline: true }).moveDown(0.3);
+
+//             user.projectExperience.forEach((proj) => {
+//                 doc.fontSize(12).text(`${proj.projectName} (${proj.startDate} - ${proj.endDate})`);
+//                 doc.fontSize(11).text(`Tech Used: ${proj.technologiesUsed.join(", ")}`);
+//                 doc.fontSize(11).text(proj.description);
+//                 doc.moveDown(); // Adds spacing between projects
+//             });
+//         }
+
+
+//         // End document
+//         doc.end();
+
+//         return pdfPath;
+//     } catch (error) {
+//         console.error("Error generating CV:", error);
+//         throw error;
+//     }
+// };
+
+
+//when mannually entered data generated CV at that time that data will convert to the extractedText
+// const generateCV = async (userId) => {
+//     try {
+//         const user = await User.findById(userId).select("-password -file");
+//         if (!user) {
+//             throw new Error("User not found");
+//         }
+
+//         const pdfDir = path.join(__dirname, "../public/pdfs");
+//         if (!fs.existsSync(pdfDir)) {
+//             fs.mkdirSync(pdfDir, { recursive: true });
+//         }
+
+//         const pdfPath = path.join(pdfDir, `${user._id}_CV.pdf`);
+//         const doc = new PDFDocument({ size: "A4", margin: 50 });
+//         const writeStream = fs.createWriteStream(pdfPath);
+//         doc.pipe(writeStream);
+
+//         let extractedText = ""; // Store extracted text
+
+//         // **Header (Name, Contact, LinkedIn, Email)**
+//         const headerText = `
+//         ${user.personalInformation.firstName || ""} ${user.personalInformation.lastName || ""}
+//         ${user.personalInformation.email || ""} | ${user.personalInformation.contactNo || ""}
+//         ${user.about.linkedInURL || ""}
+//         `;
+//         extractedText += headerText + "\n\n";
+
+//         doc.fontSize(20).text(`${user.personalInformation.firstName || ""} ${user.personalInformation.lastName || ""}`, { align: "center" });
+//         doc.fontSize(12).text(`${user.personalInformation.email || ""} | ${user.personalInformation.contactNo || ""}`, { align: "center" });
+//         doc.fontSize(12).fillColor("blue").text(user.about.linkedInURL || "", { align: "center", link: user.about.linkedInURL || "" });
+//         doc.moveDown();
+
+//         // **Professional Summary**
+//         if (user.about.description) {
+//             extractedText += `Professional Summary:\n${user.about.description}\n\n`;
+//             doc.fontSize(14).fillColor("black").text("Professional Summary", { underline: true }).moveDown(0.3);
+//             doc.fontSize(11).text(user.about.description).moveDown();
+//         }
+
+//         // **Skills** (Limited to 6)
+//         if (user.skills.length) {
+//             extractedText += `Skills:\n${user.skills.slice(0, 6).join(", ")}\n\n`;
+//             doc.fontSize(14).fillColor("black").text("Skills", { underline: true }).moveDown(0.3);
+//             doc.fontSize(11).text(user.skills.slice(0, 6).join(", ")).moveDown();
+//         }
+
+//         // **Work Experience** (Show only last 2 jobs)
+//         if (user.workExperience.length) {
+//             doc.fontSize(14).fillColor("black").text("Work Experience", { underline: true }).moveDown(0.3);
+//             user.workExperience.slice(0, 2).forEach((work) => {
+//                 const workText = `${work.jobTitle} at ${work.companyName} (${work.startDate.year} - ${work.currentlyWorking ? "Present" : work.endDate.year})\n${work.description || ""}\n\n`;
+//                 extractedText += workText;
+
+//                 doc.fontSize(12).text(`${work.jobTitle} at ${work.companyName} (${work.startDate.year} - ${work.currentlyWorking ? "Present" : work.endDate.year})`);
+//                 if (work.description) {
+//                     doc.fontSize(11).text(work.description, { lineGap: 3 });
+//                 }
+//                 doc.moveDown();
+//             });
+//         }
+
+//         // **Education** (All qualifications)
+//         if (user.Qualification && user.Qualification.length > 0) {
+//             doc.fontSize(14).fillColor("black").text("Education", { underline: true }).moveDown(0.3);
+
+//             user.Qualification.forEach((edu, index) => {
+//                 const eduText = `${index + 1}. ${edu.Degree} in ${edu.Field_of_study}, ${edu.UniversityName} (${edu.Start_month_year} - ${edu.End_month_year})\n\n`;
+//                 extractedText += eduText;
+
+//                 doc.fontSize(12).text(`${index + 1}. ${edu.Degree} in ${edu.Field_of_study}, ${edu.UniversityName} (${edu.Start_month_year} - ${edu.End_month_year})`);
+//                 doc.moveDown();
+//             });
+//         }
+
+//         // **Certifications** (Show max 2)
+//         if (user.MicrosoftCertificates.length) {
+//             doc.fontSize(14).fillColor("black").text("Certifications", { underline: true }).moveDown(0.3);
+//             user.MicrosoftCertificates.slice(0, 2).forEach((cert) => {
+//                 const certText = `${cert.CertificateName} - ${cert.DateEarned}\n`;
+//                 extractedText += certText;
+
+//                 doc.fontSize(12).text(certText);
+//             });
+//             doc.moveDown();
+//         }
+
+//         // **Projects** (All projects)
+//         if (user.projectExperience.length) {
+//             doc.fontSize(14).fillColor("black").text("Projects", { underline: true }).moveDown(0.3);
+
+//             user.projectExperience.forEach((proj) => {
+//                 const projText = `${proj.projectName} (${proj.startDate} - ${proj.endDate})\nTech Used: ${proj.technologiesUsed.join(", ")}\n${proj.description}\n\n`;
+//                 extractedText += projText;
+
+//                 doc.fontSize(12).text(`${proj.projectName} (${proj.startDate} - ${proj.endDate})`);
+//                 doc.fontSize(11).text(`Tech Used: ${proj.technologiesUsed.join(", ")}`);
+//                 doc.fontSize(11).text(proj.description);
+//                 doc.moveDown();
+//             });
+//         }
+
+//         // End document
+//         doc.end();
+
+//         // Wait for the PDF to finish writing before proceeding
+//         await new Promise((resolve, reject) => {
+//             writeStream.on("finish", resolve);
+//             writeStream.on("error", reject);
+//         });
+
+//         // **Update user's extractText field with extracted content**
+//         user.extractText = {
+//             content: extractedText.trim(),
+
+//             fileType: "pdf",
+//             generatedAt: new Date(),
+//         };
+
+//         await user.save();
+
+//         return pdfPath;
+//     } catch (error) {
+//         console.error("Error generating CV:", error);
+//         throw error;
+//     }
+// };
+
+const generateCV = async (userId) => {
+    try {
+        const user = await User.findById(userId).select("-password -file");
+        if (!user) {
+            throw new Error("User not found");
+        }
+
+        const pdfDir = path.join(__dirname, "../public/pdfs");
+        if (!fs.existsSync(pdfDir)) {
+            fs.mkdirSync(pdfDir, { recursive: true });
+        }
+
+        const pdfPath = path.join(pdfDir, `${user._id}_CV.pdf`);
+        const doc = new PDFDocument({ size: "A4", margin: 50 });
+        const writeStream = fs.createWriteStream(pdfPath);
+        doc.pipe(writeStream);
+
+        let extractedText = ""; // Store extracted text as a string
+
+        // **Header (Name, Contact, LinkedIn, Email)**
+        const headerText = `${user.personalInformation.firstName || ""} ${user.personalInformation.lastName || ""}
+        ${user.personalInformation.email || ""} | ${user.personalInformation.contactNo || ""}
+        ${user.about.linkedInURL || ""}\n\n`;
+
+        extractedText += headerText;
+
+        doc.fontSize(20).text(`${user.personalInformation.firstName || ""} ${user.personalInformation.lastName || ""}`, { align: "center" });
+        doc.fontSize(12).text(`${user.personalInformation.email || ""} | ${user.personalInformation.contactNo || ""}`, { align: "center" });
+        doc.fontSize(12).fillColor("blue").text(user.about.linkedInURL || "", { align: "center", link: user.about.linkedInURL || "" });
+        doc.moveDown();
+
+        // **Professional Summary**
+        if (user.about.description) {
+            extractedText += `Professional Summary:\n${user.about.description}\n\n`;
+            doc.fontSize(14).fillColor("black").text("Professional Summary", { underline: true }).moveDown(0.3);
+            doc.fontSize(11).text(user.about.description).moveDown();
+        }
+
+        // **Skills** (Limited to 6)
+        if (user.skills.length) {
+            extractedText += `Skills:\n${user.skills.slice(0, 6).join(", ")}\n\n`;
+            doc.fontSize(14).fillColor("black").text("Skills", { underline: true }).moveDown(0.3);
+            doc.fontSize(11).text(user.skills.slice(0, 6).join(", ")).moveDown();
+        }
+
+        // **Work Experience** (Show only last 2 jobs)
+        if (user.workExperience.length) {
+            doc.fontSize(14).fillColor("black").text("Work Experience", { underline: true }).moveDown(0.3);
+            user.workExperience.slice(0, 2).forEach((work) => {
+                const workText = `${work.jobTitle} at ${work.companyName} (${work.startDate.year} - ${work.currentlyWorking ? "Present" : work.endDate.year})
+                ${work.description || ""}\n\n`;
+
+                extractedText += workText;
+                doc.fontSize(12).text(`${work.jobTitle} at ${work.companyName} (${work.startDate.year} - ${work.currentlyWorking ? "Present" : work.endDate.year})`);
+                if (work.description) {
+                    doc.fontSize(11).text(work.description, { lineGap: 3 });
+                }
+                doc.moveDown();
+            });
+        }
+
+        // **Education** (All qualifications)
+        if (user.Qualification && user.Qualification.length > 0) {
+            doc.fontSize(14).fillColor("black").text("Education", { underline: true }).moveDown(0.3);
+            user.Qualification.forEach((edu, index) => {
+                const eduText = `${index + 1}. ${edu.Degree} in ${edu.Field_of_study}, ${edu.UniversityName} (${edu.Start_month_year} - ${edu.End_month_year})\n\n`;
+                extractedText += eduText;
+
+                doc.fontSize(12).text(`${index + 1}. ${edu.Degree} in ${edu.Field_of_study}, ${edu.UniversityName} (${edu.Start_month_year} - ${edu.End_month_year})`);
+                doc.moveDown();
+            });
+        }
+
+        // **Certifications** (Show max 2)
+        if (user.MicrosoftCertificates.length) {
+            doc.fontSize(14).fillColor("black").text("Certifications", { underline: true }).moveDown(0.3);
+            user.MicrosoftCertificates.slice(0, 2).forEach((cert) => {
+                const certText = `${cert.CertificateName} - ${cert.DateEarned}\n`;
+                extractedText += certText;
+                doc.fontSize(12).text(certText);
+            });
+            doc.moveDown();
+        }
+
+        // **Projects** (All projects)
+        if (user.projectExperience.length) {
+            doc.fontSize(14).fillColor("black").text("Projects", { underline: true }).moveDown(0.3);
+            user.projectExperience.forEach((proj) => {
+                const projText = `${proj.projectName} (${proj.startDate} - ${proj.endDate})\nTech Used: ${proj.technologiesUsed.join(", ")}\n${proj.description}\n\n`;
+                extractedText += projText;
+
+                doc.fontSize(12).text(`${proj.projectName} (${proj.startDate} - ${proj.endDate})`);
+                doc.fontSize(11).text(`Tech Used: ${proj.technologiesUsed.join(", ")}`);
+                doc.fontSize(11).text(proj.description);
+                doc.moveDown();
+            });
+        }
+
+        // End document
+        doc.end();
+
+        // Wait for the PDF to finish writing before proceeding
+        await new Promise((resolve, reject) => {
+            writeStream.on("finish", resolve);
+            writeStream.on("error", reject);
+        });
+
+        // **Update user's extractText field as a string**
+        user.extractText = extractedText.trim();
+
+        await user.save();
+
+        return pdfPath;
+    } catch (error) {
+        console.error("Error generating CV:", error);
+        throw error;
+    }
+};
+
+
+//route to generate pdf
+router.get("/generate-cv/:userId", async (req, res) => {
+    try {
+        const userId = req.params.userId;
+        const pdfPath = await generateCV(userId);
+        return res.json({ message: "CV generated successfully", pdfUrl: `/pdfs/${path.basename(pdfPath)}` });
+    } catch (error) {
+        return res.status(500).json({ message: "Error generating CV", error: error.message });
+    }
+});
+
+
+module.exports = router;

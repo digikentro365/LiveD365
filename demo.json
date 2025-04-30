@@ -1,0 +1,48 @@
+{
+    "personalInfo": {
+      "firstName": "John",
+      "lastName": "Doe",
+      "email": "john.doe@example.com",
+      "contactInfo": {
+        "city": "New York",
+        "state": "NY",
+        "country": "USA"
+      },
+      "aboutYourself": "Software Engineer with 5 years of experience.",
+      "linkedinUrl": "https://linkedin.com/in/johndoe",
+      "professionalTitle": "Software Engineer",
+      "microsoftExp": true,
+      "experience": 5
+    },
+    "professionalExperience": [
+      {
+        "companyName": "TechCorp",
+        "jobTitle": "Senior Developer",
+        "industryType": "Software",
+        "location": "Remote",
+        "currentlyWorking": true,
+        "startDate": "2020-01-01",
+        "description": "Developing scalable web applications."
+      }
+    ],
+    "skills": {
+      "acquiredSkills": [
+        { "skillName": "JavaScript", "yearsOfExperience": 5 },
+        { "skillName": "React", "yearsOfExperience": 3 }
+      ],
+      "techLanguages": ["JavaScript", "React", "Node.js"],
+      "projects": ["Inventory Management System", "E-commerce Platform"]
+    },
+    "education": [
+      {
+        "highestQualification": "Master's",
+        "universityName": "MIT",
+        "degree": "Computer Science",
+        "fieldOfStudy": "Software Engineering",
+        "startMonth": "August 2015",
+        "endMonth": "May 2019",
+        "description": "Studied core software development principles.",
+        "microsoftCertificate": true
+      }
+    ]
+  }
