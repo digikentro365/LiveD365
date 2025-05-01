@@ -22,33 +22,13 @@ const fuzzball = require('fuzzball');
 const tokenizer = new natural.WordTokenizer();
 const TfIdf = natural.TfIdf;
 const { stringify } = require('csv-stringify/sync');
-const Settings = require('../models/settings');
-let genAI;
 
-// Initialize genAI with settings from database
-const initializeGenAI = async () => {
-    try {
-        const settings = await Settings.getCurrentSettings();
-        genAI = new GoogleGenerativeAI(settings.geminiApiKey);
-        console.log('GenAI initialized with database settings');
-    } catch (error) {
-        console.error('Error initializing genAI:', error);
-        // Fallback to environment variable if database fetch fails
-        genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-        console.log('GenAI initialized with environment variable');
-    }
-};
 
-// Function to update genAI instance
-const updateGenAI = (newApiKey) => {
-    genAI = new GoogleGenerativeAI(newApiKey);
-    console.log('GenAI instance updated with new API key');
-};
 
-// Initialize when server starts
-initializeGenAI().catch(console.error);
 
 require('dotenv').config();
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 //store CV in uploads folder with name and date
 const storage = multer.diskStorage({
@@ -82,83 +62,10 @@ const transporter = nodemailer.createTransport({
     }
 });
 
-
 //code generation using crypto
 function generate4DigitCode() {
     return crypto.randomInt(1000, 10000).toString();
 }
-
-// Add this utility function at the top of your file
-function ensureAsciiCompatible(text) {
-    if (!text) return '';
-    
-    // First, normalize Unicode characters
-    let normalized = text.normalize('NFKD');
-    
-    // Then remove any remaining non-ASCII characters
-    return normalized.replace(/[^\x00-\x7F]/g, '');
-}
-
-function sanitizeForGemini(input) {
-    if (input === null || input === undefined) return '';
-    
-    // Convert to string if not already
-    let str = typeof input === 'string' ? input : JSON.stringify(input);
-    
-    // First pass: Replace specific Unicode characters with ASCII equivalents
-    str = str
-        .replace(/[\u2018\u2019\u201A\u201B\u2039\u203A]/g, "'") // single quotes
-        .replace(/[\u201C\u201D\u201E\u201F\u00AB\u00BB]/g, '"') // double quotes
-        .replace(/[\u2010-\u2015]/g, "-") // dashes
-        .replace(/[\u2022\u2023\u25E6\u2043\u2219]/g, "*") // bullets
-        .replace(/[\u00A0]/g, ' '); // non-breaking space
-
-    // Second pass: Remove any remaining non-ASCII characters except basic whitespace
-    str = str.replace(/[^\x20-\x7E\n\r\t]/g, ' ');
-
-    // Normalize whitespace
-    return str.replace(/\s+/g, ' ').trim();
-}
-
-const extractTextFromCV = async (filePath) => {
-    try {
-        const ext = path.extname(filePath).toLowerCase();
-        let text = "";
-
-        if (ext === '.docx') {
-            const result = await mammoth.extractRawText({ path: filePath });
-            text = result.value || "";
-        } else if (ext === '.pdf') {
-            const dataBuffer = fs.readFileSync(filePath);
-            const result = await pdfParse(dataBuffer);
-            text = result.text || "";
-        } else {
-            throw new Error('Unsupported file type. Only DOCX and PDF files are allowed.');
-        }
-
-        // Enhanced validation
-        if (!text || text.length < 50) {
-            throw new Error("Extracted text is too small or empty");
-        }
-
-        // Convert to ASCII-compatible text
-        text = ensureAsciiCompatible(text);
-
-        // Final sanitization
-        const sanitizedText = sanitizeForGemini(text);
-
-        if (!sanitizedText || sanitizedText.length < 50) {
-            throw new Error("Text became empty after sanitization");
-        }
-
-        return sanitizedText;
-    } catch (error) {
-        console.error('Error in extractTextFromCV:', error.message || error);
-        throw error;
-    }
-};
-
-
 
 //defined null initially then generated code stored in this
 const verificationCodes = {};
@@ -176,74 +83,179 @@ function normalizeDate(dateString) {
     return parsedDate.isValid() ? parsedDate.format("YYYY-MM-DD") : null; // Return formatted date or null if invalid
 }
 
+
+// **Move this function ABOVE the register route**   working properly
+// async function getJsonFromGemini(text) {
+//     try {
+//         const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
+//         const prompt = `
+//             Extract the relevant information from the following resume text and return it as a structured JSON object.
+//             The JSON should include: 
+//             - personalInformation(firstName, lastName, email, contactNo, city, state, country)
+//             - about(description, professionalTitle, primaryRole, microsoftDynamicsExpertise, microsoftDynamicsProduct, yearsOfExperience, linkedInURL)
+//             - Qualification (array with UniversityName, Degree, Field_of_study, description)
+//             - workExperience (array with companyName, jobTitle, designation, industryType, location, currentlyWorking, startDate, endDate, description)
+//             - skills (array)
+//             - projectExperience (array with projectName, jobTitle, description, technologiesUsed, startDate, endDate)
+//             - MicrosoftCertificates(CertificateName,DateEarned,ValidityDate,certificateURL,description)
+
+//             Resume text:
+//             ${text}
+//             `;
+
+//         const response = await model.generateContent(prompt);
+//         const result = response.response;
+//         console.log(result);
+
+
+//         if (!result || !result.text) {
+//             throw new Error("Invalid response from Gemini API");
+//         }
+
+//         let jsonString = result.text();
+//         jsonString = jsonString.replace(/```json|```/gi, '').trim(); // Remove code block markers if present
+
+//         return JSON.parse(jsonString);
+//     } catch (error) {
+//         console.error("Error extracting JSON from Gemini:", error);
+//         return null; // Return null in case of failure
+//     }
+//     // If JSON is broken, attempt to fix minor errors
+//     const fixedJson = responseData.replace(/,(\s*[}\]])/g, '$1'); // Removes trailing commas
+//     try {
+//         return JSON.parse(fixedJson);
+//     } catch (finalError) {
+//         console.error("Failed to fix JSON:", finalError.message);
+//         return null; // Handle gracefully instead of crashing
+//     }
+// }
 async function getJsonFromGemini(text) {
     try {
-        const settings = await Settings.getCurrentSettings();
         const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
+                // const model = await getWorkingGeminiClient();  // <- updated only this line
 
-        // Triple sanitization with different approaches
-        const safePrompt = ensureAsciiCompatible(
-            sanitizeForGemini(settings.jsonExtractionPrompt)
-        );
-        
-        const safeText = ensureAsciiCompatible(
-            sanitizeForGemini(text)
-        );
+        const prompt = `
+            Extract the relevant information from the following resume text and return it as a properly formatted JSON object.
+            Ensure the JSON is syntactically correct without trailing commas or errors.
+            Specifically look for a section titled 'Licenses & Certifications' or similar.
+            From there, extract ONLY the certifications that are issued by Microsoft.
+            Ignore all other certifications.
+            Pay special attention to project experience sections which may be titled:
+            - "Project Experience"
+            - "Projects"
+            - "Project Work"
+            - Or may appear under company/job entries
 
-        // Create the final input with clear separation
-        const finalInput = `${safePrompt}\n\nRESUME_CONTENT:\n${safeText}`;
+            For each project, extract:
+            1. Project name (look for patterns like "Project – [name]")
+            2. Role in the project
+            3. Detailed description (including responsibilities and achievements)
+            4. Technologies used (especially Microsoft Dynamics modules)
+            5. Dates/duration if available
 
-        // Debug output (remove in production)
-        console.log('Final input length:', finalInput.length);
-        console.log('First 200 chars:', finalInput.substring(0, 200));
-        console.log('Last 200 chars:', finalInput.substring(finalInput.length - 200));
 
-        // Convert to plain ASCII string
-        const asciiOnly = Buffer.from(finalInput, 'utf8').toString('ascii', 'ignore');
-
-        // Make the API call with error wrapping
-        try {
-            const response = await model.generateContent(asciiOnly);
-            const result = response.response;
-
-            if (!result || !result.text) {
-                throw new Error("Empty response from Gemini API");
-            }
-
-            let jsonString = result.text();
-            jsonString = jsonString.replace(/```json|```/gi, '').trim();
-
-            // Parse with multiple fallback attempts
-            try {
-                return JSON.parse(jsonString);
-            } catch (parseError) {
-                console.warn("First parse attempt failed, trying fixes...");
-                
-                // Attempt 1: Remove trailing commas
-                let fixed = jsonString.replace(/,\s*([\]}])/g, '$1');
-                try {
-                    return JSON.parse(fixed);
-                } catch (e) {
-                    // Attempt 2: Replace single quotes
-                    fixed = fixed.replace(/'/g, '"');
-                    try {
-                        return JSON.parse(fixed);
-                    } catch (e) {
-                        // Attempt 3: Strict cleanup
-                        fixed = fixed.replace(/(\w+):/g, '"$1":')
-                                    .replace(/,\s*}/g, '}')
-                                    .replace(/,\s*]/g, ']');
-                        return JSON.parse(fixed);
+            The extracted Microsoft certifications should be returned under a field named 'MicrosoftCertificates'.
+            The JSON should include: 
+            {
+                "personalInformation": {
+                    "firstName": "",
+                    "lastName": "",
+                    "email": "",
+                    "contactNo": "",
+                    "city": "",
+                    "state": "",
+                    "country": ""
+                },
+                "about": {
+                    "description": "",
+                    "professionalTitle": "",
+                    "primaryRole": "",
+                    "microsoftDynamicsExpertise": "",
+                    "microsoftDynamicsProduct": "",
+                    "yearsOfExperience": "",
+                    "linkedInURL": ""
+                },
+                "Qualification": [
+                    {
+                        "UniversityName": "",
+                        "Degree": "",
+                        "Field_of_study": "",
+                        "Start_month_year":"",
+                        "End_month_year": "",
+                        "description": ""
                     }
-                }
+                ],
+                "workExperience": [
+                    {
+                        "companyName": "",
+                        "jobTitle": "",
+                        "designation": "",
+                        "industryType": "",
+                        "location": "",
+                        "currentlyWorking": false,
+                        "startDate": "",
+                        "endDate": "",
+                        "description": ""
+                    }
+                ],
+                "skills": [],
+                "projectExperience": [
+                    {
+                        "projectName": "Extract the full project name",
+                        "jobTitle": "Role in the project",
+                        "description": "Detailed responsibilities and achievements. Combine all bullet points into a coherent paragraph.",
+                        "technologiesUsed": ["List all relevant technologies/modules mentioned"],
+                        "startDate": "If available",
+                        "endDate": "If available"
+                    }
+                ],
+               "MicrosoftCertificates": [
+                    {
+                        "CertificateName": "Extract the full certification name including code (e.g., MB-210)",
+                        "DateEarned": "Leave blank if not available",
+                        "ValidityDate": "Leave blank if not available",
+                        "certificateURL": "Leave blank if not available in the document",
+                        "description": "Mention the issuing authority (e.g., Microsoft) and any unique certification code seen (e.g., H743-6952)"
+                    }
+]
+
             }
-        } catch (apiError) {
-            console.error('Raw API error:', apiError);
-            throw new Error(`Gemini API error: ${apiError.message}`);
+
+            Resume text:
+            ${text}
+        `;
+
+        const response = await model.generateContent(prompt);
+        const result = response.response;
+
+        if (!result || !result.text) {
+            throw new Error("Invalid response from Gemini API");
+        }
+
+        let jsonString = result.text();
+        jsonString = jsonString.replace(/```json|```/gi, '').trim(); // Remove markdown code block markers
+
+        // Try parsing JSON safely
+        try {
+            return JSON.parse(jsonString);
+        } catch (error) {
+            console.warn("Initial JSON parse failed, attempting to fix formatting...");
+
+            // Auto-fix common JSON formatting issues
+            let fixedJsonString = jsonString
+                .replace(/,\s*([\]}])/g, '$1') // Remove trailing commas
+                .replace(/(\r\n|\n|\r)/gm, ''); // Remove newlines
+
+            try {
+                return JSON.parse(fixedJsonString);
+            } catch (finalError) {
+                console.error("Failed to fix JSON:", finalError.message);
+                return null; // Gracefully return null
+            }
         }
     } catch (error) {
-        console.error("Complete error in getJsonFromGemini:", error);
-        throw new Error(`Failed to process with Gemini: ${error.message}`);
+        console.error("Error extracting JSON from Gemini:", error);
+        return null; // Return null in case of failure
     }
 }
 
@@ -319,466 +331,17 @@ const generateExtractText = (user) => {
     return extractText.trim(); // Remove leading/trailing whitespace
 };
 
-// router.post('/register', upload.single('file'), async (req, res) => {
-//     try {
-//         const { firstName, lastName, email, password, contactNo } = req.body;
-
-//         if (!email || !password || !contactNo) {
-//             return res.status(400).json("Email, Password, and ContactNo are required");
-//         }
-
-//         const passwordCheck = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/;
-//         if (!passwordCheck.test(password)) {
-//             return res.status(400).json({
-//                 error: "Password must contain at least 1 uppercase letter, 1 lowercase letter, 1 digit, and 1 special character."
-//             });
-//         }
-
-//         const existingUser = await User.findOne({ email });
-//         if (existingUser) return res.status(409).json('Email already exists.');
-
-//         const hashedPassword = await bcrypt.hash(password, 10);
-
-//         let personalInformation = { };
-//         let about = {};
-//         let skills = [];
-//         let projectExperience = [];
-//         let MicrosoftCertificates = [];
-//         let Qualification = [];
-//         let workExperience = [];
-//         let extractText = "";
-
-//         if (req.file) {
-//             const { path: filePath, originalname: filename } = req.file;
-//             const ext = path.extname(filename).toLowerCase();
-
-//             let text = "";
-//             if (ext === '.docx') {
-//                 const result = await mammoth.extractRawText({ path: filePath });
-//                 text = result.value;
-//             } else if (ext === '.pdf') {
-//                 const dataBuffer = fs.readFileSync(filePath);
-//                 const result = await pdfParse(dataBuffer);
-//                 text = result.text;
-//             } else {
-//                 return res.status(400).json({ error: 'Unsupported file type. Only DOCX and PDF files are allowed.' });
-//             }
-
-//             const extractedData = await getJsonFromGemini(text);
-
-//             if (!extractedData) {
-//                 return res.status(500).json({ error: "Failed to extract data from CV" });
-//             }
-
-//             personalInformation = extractedData.personalInformation || personalInformation;
-//             about = extractedData.about || {};
-//             skills = extractedData.skills || [];
-//             projectExperience = extractedData.projectExperience || [];
-//             Qualification = extractedData.Qualification || [];
-//             workExperience = extractedData.workExperience || [];
-
-//             // **Generate extractText from structured data**
-//             extractText = generateExtractText({
-//                 personalInformation,
-//                 about,
-//                 skills,
-//                 projectExperience,
-//                 MicrosoftCertificates,
-//                 Qualification,
-//                 workExperience
-//             });
-//         }
-
-//         const newUser = new User({
-//             firstName,
-//             lastName,
-//             email,
-//             password: hashedPassword,
-//             contactNo,
-//             file: req.file ? req.file.path : null,
-//             personalInformation,
-//             about,
-//             skills,
-//             projectExperience,
-//             MicrosoftCertificates,
-//             Qualification,
-//             workExperience,
-//             extractText // **Use the generated extractText**
-//         });
-
-//         const userData = await newUser.save();
-//         const token = jwt.sign({ userId: userData._id }, process.env.JWT_SECRET);
-
-//         const code = generate4DigitCode();
-//         verificationCodes[email] = code;
-
-//         await transporter.sendMail({
-//             from: process.env.EMAIL_USER,
-//             to: email,
-//             subject: "Your Verification Code",
-//             text: `Your 4-digit verification code is: ${code}`
-//         });
-
-//         res.status(201).json({
-//             message: "User registered successfully. Verification code sent to email.",
-//             token,
-//             userData
-//         });
-
-//     } catch (e) {
-//         console.error(e);
-//         res.status(500).json({ error: e.message || "Internal Server Error" });
-//     }
-// });
-
-
-
-
-// without generateExtracttext function and directly to string format extracttext
-
-
-//  router.post('/register', upload.single('file'), async (req, res) => {
-//     try {
-//         const { firstName, lastName, email, password, contactNo } = req.body;
-
-//         if (!email || !password || !contactNo) {
-//             return res.status(400).json("Email, Password, and ContactNo are required");
-//         }
-
-//         const passwordCheck = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/;
-//         if (!passwordCheck.test(password)) {
-//             return res.status(400).json({
-//                 error: "Password must contain at least 1 uppercase letter, 1 lowercase letter, 1 digit, and 1 special character."
-//             });
-//         }
-
-//         const existingUser = await User.findOne({ email });
-//         if (existingUser) return res.status(409).json('Email already exists.');
-
-//         const hashedPassword = await bcrypt.hash(password, 10);
-
-//         let personalInformation = { };
-//         let about = {};
-//         let skills = [];
-//         let projectExperience = [];
-//         let MicrosoftCertificates = [];
-//         let Qualification = [];
-//         let workExperience = [];
-//         let extractText = "";
-
-//         if (req.file) {
-//             const { path: filePath, originalname: filename } = req.file;
-//             const ext = path.extname(filename).toLowerCase();
-
-//             let text = "";
-//             if (ext === '.docx') {
-//                 const result = await mammoth.extractRawText({ path: filePath });
-//                 text = result.value;
-//             } else if (ext === '.pdf') {
-//                 const dataBuffer = fs.readFileSync(filePath);
-//                 const result = await pdfParse(dataBuffer);
-//                 text = result.text;
-//             } else {
-//                 return res.status(400).json({ error: 'Unsupported file type. Only DOCX and PDF files are allowed.' });
-//             }
-
-//             const extractedData = await getJsonFromGemini(text);
-
-//             if (!extractedData) {
-//                 return res.status(500).json({ error: "Failed to extract data from CV" });
-//             }
-
-//             personalInformation = extractedData.personalInformation || personalInformation;
-//             about = extractedData.about || {};
-//             skills = extractedData.skills || [];
-//             projectExperience = extractedData.projectExperience || [];
-//             Qualification = extractedData.Qualification || [];
-//             workExperience = extractedData.workExperience || [];
-
-//             // **Store plain text in extractText without any formatting**
-//             extractText += `${personalInformation.firstName || ""} ${personalInformation.lastName || ""}\n`;
-//             extractText += `${personalInformation.email || ""} | ${personalInformation.contactNo || ""}\n`;
-//             extractText += `${about.linkedInURL || ""}\n\n`;
-
-//             extractText += `Professional Summary:\n${about.description || ""}\n\n`;
-//             extractText += `Skills: ${skills.join(", ")}\n\n`;
-
-//             if (workExperience.length) {
-//                 extractText += "Work Experience:\n";
-//                 workExperience.forEach(work => {
-//                     extractText += `${work.jobTitle} at ${work.companyName} (${work.startDate.year} - ${work.currentlyWorking ? "Present" : work.endDate.year})\n`;
-//                     extractText += `${work.description || ""}\n\n`;
-//                 });
-//             }
-
-//             if (Qualification.length) {
-//                 extractText += "Education:\n";
-//                 Qualification.forEach((edu, index) => {
-//                     extractText += `${index + 1}. ${edu.Degree} in ${edu.Field_of_study}, ${edu.UniversityName} (${edu.Start_month_year} - ${edu.End_month_year})\n\n`;
-//                 });
-//             }
-
-//             if (MicrosoftCertificates.length) {
-//                 extractText += "Certifications:\n";
-//                 MicrosoftCertificates.forEach(cert => {
-//                     extractText += `${cert.CertificateName} - ${cert.DateEarned}\n`;
-//                 });
-//                 extractText += "\n";
-//             }
-
-//             if (projectExperience.length) {
-//                 extractText += "Projects:\n";
-//                 projectExperience.forEach(proj => {
-//                     extractText += `${proj.projectName} (${proj.startDate} - ${proj.endDate})\n`;
-//                     extractText += `Tech Used: ${proj.technologiesUsed.join(", ")}\n`;
-//                     extractText += `${proj.description}\n\n`;
-//                 });
-//             }
-//         }
-
-//         const newUser = new User({
-//             firstName,
-//             lastName,
-//             email,
-//             password: hashedPassword,
-//             contactNo,
-//             file: req.file ? req.file.path : null,
-//             personalInformation,
-//             about,
-//             skills,
-//             projectExperience,
-//             MicrosoftCertificates,
-//             Qualification,
-//             workExperience,
-//             extractText: extractText.trim() // **Store plain string**
-//         });
-
-//         if (Array.isArray(about.microsoftDynamicsProduct)) {
-//             about.microsoftDynamicsProduct = about.microsoftDynamicsProduct.join(", ");
-//         }
-
-
-//         const userData = await newUser.save();
-//         const token = jwt.sign({ userId: userData._id }, process.env.JWT_SECRET);
-
-//         const code = generate4DigitCode();
-//         verificationCodes[email] = code;
-
-//         await transporter.sendMail({
-//             from: process.env.EMAIL_USER,
-//             to: email,
-//             subject: "Your Verification Code",
-//             text: `Your 4-digit verification code is: ${code}`
-//         });
-
-//         res.status(201).json({
-//             message: "User registered successfully. Verification code sent to email.",
-//             token,
-//             userData
-//         });
-
-//     } catch (e) {
-//         console.error(e);
-//         res.status(500).json({ error: e.message || "Internal Server Error" });
-//     }
-// });
-
-
-//register 23rd march admin and user
-// router.post('/register', upload.single('file'), async (req, res) => {
-//     try {
-//         const { firstName, lastName, email, password, contactNo, role } = req.body;
-
-//         if (!email || !password || !contactNo) {
-//             return res.status(400).json("Email, Password, and ContactNo are required");
-//         }
-
-//         const passwordCheck = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/;
-//         if (!passwordCheck.test(password)) {
-//             return res.status(400).json({
-//                 error: "Password must contain at least 1 uppercase letter, 1 lowercase letter, 1 digit, and 1 special character."
-//             });
-//         }
-
-//         const existingUser = await User.findOne({ email });
-//         if (existingUser) return res.status(409).json('Email already exists.');
-
-//         const hashedPassword = await bcrypt.hash(password, 10);
-
-//         let personalInformation = {};
-//         let about = {};
-//         let skills = [];
-//         let projectExperience = [];
-//         let MicrosoftCertificates = [];
-//         let Qualification = [];
-//         let workExperience = [];
-//         let extractText = "";
-
-//         if (req.file) {
-//             const { path: filePath, originalname: filename } = req.file;
-//             const ext = path.extname(filename).toLowerCase();
-
-//             let text = "";
-//             if (ext === '.docx') {
-//                 const result = await mammoth.extractRawText({ path: filePath });
-//                 text = result.value;
-//             } else if (ext === '.pdf') {
-//                 const dataBuffer = fs.readFileSync(filePath);
-//                 const result = await pdfParse(dataBuffer);
-//                 text = result.text;
-//             } else {
-//                 return res.status(400).json({ error: 'Unsupported file type. Only DOCX and PDF files are allowed.' });
-//             }
-
-//             const extractedData = await getJsonFromGemini(text);
-
-//             if (!extractedData) {
-//                 return res.status(500).json({ error: "Failed to extract data from CV" });
-//             }
-
-//             personalInformation = extractedData.personalInformation || personalInformation;
-//             about = extractedData.about || {};
-//             skills = extractedData.skills || [];
-//             projectExperience = extractedData.projectExperience || [];
-//             Qualification = extractedData.Qualification || [];
-//             workExperience = extractedData.workExperience || [];
-
-//             workExperience.forEach(work => {
-//                 if (work.startDate) {
-//                     work.startDate = normalizeDate(work.startDate);
-//                 }
-//                 if (work.endDate) {
-//                     work.endDate = normalizeDate(work.endDate);
-//                 }
-//             });
-
-//             Qualification.forEach(edu => {
-//                 if (edu.Start_month_year) {
-//                     edu.Start_month_year = normalizeDate(edu.Start_month_year);
-//                 }
-//                 if (edu.End_month_year) {
-//                     edu.End_month_year = normalizeDate(edu.End_month_year);
-//                 }
-//             });
-
-//             projectExperience.forEach(proj => {
-//                 if (proj.startDate) {
-//                     proj.startDate = normalizeDate(proj.startDate);
-//                 }
-//                 if (proj.endDate) {
-//                     proj.endDate = normalizeDate(proj.endDate);
-//                 }
-//             });
-
-//             extractText += `${personalInformation.firstName || ""} ${personalInformation.lastName || ""}\n`;
-//             extractText += `${personalInformation.email || ""} | ${personalInformation.contactNo || ""}\n`;
-//             extractText += `${about.linkedInURL || ""}\n\n`;
-
-//             extractText += `Professional Summary:\n${about.description || ""}\n\n`;
-//             extractText += `Skills: ${skills.join(", ")}\n\n`;
-
-//             if (workExperience.length) {
-//                 extractText += "Work Experience:\n";
-//                 workExperience.forEach(work => {
-//                     let start = work.startDate || "Unknown Start Date";
-//                     let end = work.currentlyWorking ? "Present" : work.endDate || "Unknown End Date";
-//                     extractText += `${work.jobTitle} at ${work.companyName} (${start} - ${end})\n`;
-//                     extractText += `${work.description || ""}\n\n`;
-//                 });
-//             }
-
-//             if (Qualification.length) {
-//                 extractText += "Education:\n";
-//                 Qualification.forEach((edu, index) => {
-//                     extractText += `${index + 1}. ${edu.Degree} in ${edu.Field_of_study}, ${edu.UniversityName} (${edu.Start_month_year} - ${edu.End_month_year})\n\n`;
-//                 });
-//             }
-
-//             if (MicrosoftCertificates.length) {
-//                 extractText += "Certifications:\n";
-//                 MicrosoftCertificates.forEach(cert => {
-//                     extractText += `${cert.CertificateName} - ${cert.DateEarned}\n`;
-//                 });
-//                 extractText += "\n";
-//             }
-
-//             if (projectExperience.length) {
-//                 extractText += "Projects:\n";
-//                 projectExperience.forEach(proj => {
-//                     extractText += `${proj.projectName} (${proj.startDate} - ${proj.endDate})\n`;
-//                     extractText += `Tech Used: ${proj.technologiesUsed.join(", ")}\n`;
-//                     extractText += `${proj.description}\n\n`;
-//                 });
-//             }
-//         }
-
-//         const newUser = new User({
-//             firstName,
-//             lastName,
-//             email,
-//             password: hashedPassword,
-//             contactNo,
-//             role: role || "user",  // Default to "user" if not provided
-//             file: req.file ? req.file.path : null,
-//             personalInformation,
-//             about,
-//             skills,
-//             projectExperience,
-//             MicrosoftCertificates,
-//             Qualification,
-//             workExperience,
-//             extractText: extractText.trim()
-//         });
-
-//         if (Array.isArray(about.microsoftDynamicsProduct)) {
-//             about.microsoftDynamicsProduct = about.microsoftDynamicsProduct.join(", ");
-//         }
-
-//         const userData = await newUser.save();
-
-//         // ✅ **If user is an admin, add to AdminUpload schema**
-//         if (role === "admin") {
-//             await admin.create({ adminId: userData._id, uploadedEmails: [] });
-//         }
-
-//         const token = jwt.sign({ userId: userData._id, role: userData.role }, process.env.JWT_SECRET);
-
-//         const code = generate4DigitCode();
-//         verificationCodes[email] = code;
-
-//         await transporter.sendMail({
-//             from: process.env.EMAIL_USER,
-//             to: email,
-//             subject: "Your Verification Code",
-//             text: `Your 4-digit verification code is: ${code}`
-//         });
-
-//         res.status(201).json({
-//             message: "User registered successfully. Verification code sent to email.",
-//             token,
-//             userData
-//         });
-
-//     } catch (e) {
-//         console.error(e);
-//         res.status(500).json({ error: e.message || "Internal Server Error" });
-//     }
-// });
-
-
-//working 28th march
+// Store temporary user data and verification codes
+const temporaryUserData = {};
 
 router.post('/register', upload.single('file'), async (req, res) => {
     try {
         const { firstName, lastName, email, password, contactNo, role } = req.body;
-        console.log(req.body);
-
 
         if (!email || !password || !contactNo) {
             return res.status(400).json({ error: "Email, Password, and ContactNo are required" });
         }
 
-        // Password validation
         const passwordCheck = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/;
         if (!passwordCheck.test(password)) {
             return res.status(400).json({
@@ -786,7 +349,6 @@ router.post('/register', upload.single('file'), async (req, res) => {
             });
         }
 
-        // Check if email already exists
         const existingUser = await User.findOne({ email });
         if (existingUser) {
             return res.status(409).json({ error: 'Email already exists.' });
@@ -805,7 +367,6 @@ router.post('/register', upload.single('file'), async (req, res) => {
         let workExperience = [];
         let extractText = "";
 
-        // Process file (CV)
         if (req.file) {
             const { path: filePath, originalname: filename } = req.file;
             const ext = path.extname(filename).toLowerCase();
@@ -823,21 +384,10 @@ router.post('/register', upload.single('file'), async (req, res) => {
             }
 
             const extractedData = await getJsonFromGemini(text);
-            console.log(extractedData);
 
             if (!extractedData) {
                 return res.status(500).json({ error: "Failed to extract data from CV" });
             }
-            // Store extracted text separately
-            // extractText = {
-            //     content: text.trim(),
-            //     fileType: ext,
-            //     uploadedAt: new Date(),
-            // };
-
-            extractText = text.trim(); // ✅ Save full extracted text from the CV
-
-
 
             personalInformation = extractedData.personalInformation || personalInformation;
             about = extractedData.about || {};
@@ -856,29 +406,54 @@ router.post('/register', upload.single('file'), async (req, res) => {
                 if (edu.End_month_year) edu.End_month_year = normalizeDate(edu.End_month_year);
             });
 
+            projectExperience.forEach(proj => {
+                if (proj.startDate) proj.startDate = normalizeDate(proj.startDate);
+                if (proj.endDate) proj.endDate = normalizeDate(proj.endDate);
+            });
 
-            // extractText = `
-            //     ${personalInformation.firstName || ""} ${personalInformation.lastName || ""}
-            //     ${personalInformation.email || ""} | ${personalInformation.contactNo || ""}
-            //     ${about.linkedInURL || ""}
+            extractText += `${personalInformation.firstName || ""} ${personalInformation.lastName || ""}\n`;
+            extractText += `${personalInformation.email || ""} | ${personalInformation.contactNo || ""}\n`;
+            extractText += `${about.linkedInURL || ""}\n\n`;
 
-            //     Professional Summary:
-            //     ${about.description || ""}
+            extractText += `Professional Summary:\n${about.description || ""}\n\n`;
+            extractText += `Skills: ${skills.join(", ")}\n\n`;
 
-            //     Skills: ${skills.join(", ")}
-            // `.trim();
+            if (workExperience.length) {
+                extractText += "Work Experience:\n";
+                workExperience.forEach(work => {
+                    let start = work.startDate || "Unknown Start Date";
+                    let end = work.currentlyWorking ? "Present" : work.endDate || "Unknown End Date";
+                    extractText += `${work.jobTitle} at ${work.companyName} (${start} - ${end})\n`;
+                    extractText += `${work.description || ""}\n\n`;
+                });
+            }
+
+            if (Qualification.length) {
+                extractText += "Education:\n";
+                Qualification.forEach((edu, index) => {
+                    extractText += `${index + 1}. ${edu.Degree} in ${edu.Field_of_study}, ${edu.UniversityName} (${edu.Start_month_year} - ${edu.End_month_year})\n\n`;
+                });
+            }
+
+            if (projectExperience.length) {
+                extractText += "Projects:\n";
+                projectExperience.forEach(proj => {
+                    extractText += `${proj.projectName} (${proj.startDate} - ${proj.endDate})\n`;
+                    extractText += `Tech Used: ${proj.technologiesUsed.join(", ")}\n`;
+                    extractText += `${proj.description}\n\n`;
+                });
+            }
         }
 
-
-
-        const newUser = new User({
+        // Store user data temporarily
+        temporaryUserData[email] = {
             firstName,
             lastName,
             email,
             password: hashedPassword,
             contactNo,
             role: role || "user",
-            adminId: null, // Default to null
+            adminId: null,
             file: req.file ? req.file.path : null,
             personalInformation,
             about,
@@ -886,25 +461,11 @@ router.post('/register', upload.single('file'), async (req, res) => {
             projectExperience,
             Qualification,
             workExperience,
-            extractText,
-            token: null // Initially, no token stored
-        });
+            extractText: extractText.trim(),
+            token: null
+        };
 
-        const savedUser = await newUser.save();
-
-        // If the user is an admin, update their adminId field with their ObjectId
-        if (role === "admin") {
-            await User.findByIdAndUpdate(savedUser._id, { adminId: savedUser._id });
-        }
-
-
-
-
-        const token = jwt.sign({ userId: newUser._id, role: newUser.role }, process.env.JWT_SECRET);
-
-        // Store the token in the database
-        await User.findByIdAndUpdate(newUser._id, { token });
-        // Send verification code to email
+        // Generate and send verification code
         const code = generate4DigitCode();
         verificationCodes[email] = code;
 
@@ -916,9 +477,8 @@ router.post('/register', upload.single('file'), async (req, res) => {
         });
 
         res.status(201).json({
-            message: "User registered successfully. Verification code sent to email.",
-            userId: savedUser._id,
-            token
+            message: "Verification code sent to email. Please verify your email to complete registration.",
+            email
         });
 
     } catch (e) {
@@ -932,25 +492,54 @@ router.post('/verify-code', async (req, res) => {
         const { email, code } = req.body;
 
         if (!email || !code) {
-            return res.status(400).json('Email and code are required');
+            return res.status(400).json({ error: 'Email and code are required' });
         }
 
         if (!verificationCodes[email] || verificationCodes[email] !== code) {
-            return res.status(400).json('Invalid verification code');
+            return res.status(400).json({ error: 'Invalid verification code' });
         }
 
-        // Update user verification status
-        await User.findOneAndUpdate(
-            { email },
-            { isVerified: true }
-        );
+        // Get temporary user data
+        const userData = temporaryUserData[email];
+        if (!userData) {
+            return res.status(400).json({ error: 'Registration data not found. Please register again.' });
+        }
 
+        // Create new user in database
+        const newUser = new User(userData);
+        const savedUser = await newUser.save();
+
+        // If the user is an admin, update their adminId field with their ObjectId
+        if (userData.role === "admin") {
+            await User.findByIdAndUpdate(savedUser._id, { adminId: savedUser._id });
+        }
+
+        // Generate JWT token
+        const token = jwt.sign({ userId: savedUser._id, role: savedUser.role }, process.env.JWT_SECRET);
+
+        // Store the token in the database
+        await User.findByIdAndUpdate(savedUser._id, { token });
+
+        // Clean up temporary data
+        delete temporaryUserData[email];
         delete verificationCodes[email];
-        res.status(200).json('Verification successful');
+
+        // Return success response with token and user data
+        res.status(200).json({
+            message: "Verification successful",
+            token,
+            user: {
+                _id: savedUser._id,
+                email: savedUser.email,
+                firstName: savedUser.firstName,
+                lastName: savedUser.lastName,
+                role: savedUser.role
+            }
+        });
 
     } catch (e) {
         console.error(e);
-        res.status(500).json('Internal Server Error');
+        res.status(500).json({ error: e.message || "Internal Server Error" });
     }
 });
 
@@ -973,40 +562,34 @@ router.post("/login", async (req, res) => {
             return res.status(401).json({ error: "Invalid password" });
         }
 
-        // Generate a new token
+        // Generate a new token with both userId and role
         const token = jwt.sign(
-            {
-                userId: user._id,
-                role: user.role
+            { 
+                userId: user._id.toString(), // Ensure userId is a string
+                role: user.role 
             },
             process.env.JWT_SECRET,
-            { expiresIn: '24h' } // Token expires in 24 hours
+            { expiresIn: '24h' }
         );
 
-        console.log("Generated Token:", token); // Debugging
+        // Update user's token in database
+        await User.findByIdAndUpdate(user._id, { token });
 
-        // Store the token in the database
-        user.token = token;
-        await user.save();
-
-        // Prepare the response data
-        const responseData = {
+        // Send response with user data and token
+        res.status(200).json({
             message: "Login successful",
             user: {
-                id: user._id,
+                _id: user._id.toString(), // Ensure _id is a string
                 email: user.email,
                 firstName: user.firstName,
                 lastName: user.lastName,
                 role: user.role,
-                token: token // Include the token in the response
+                token: token // Include token in user object
             }
-        };
-
-        console.log("Final API Response:", responseData); // Debugging
-        res.status(200).json(responseData);
+        });
 
     } catch (e) {
-        console.error("Backend Error:", e);
+        console.error("Login Error:", e);
         res.status(500).json({ error: e.message || "Internal Server Error" });
     }
 });
@@ -1100,7 +683,30 @@ const downloadFile = async (fileUrl, modId) => {
     });
 };
 
+const extractTextFromCV = async (filePath) => {
+    
+    try {
+        const ext = path.extname(filePath).toLowerCase();
+        let text = "";
 
+        if (ext === '.docx') {
+            const result = await mammoth.extractRawText({ path: filePath });
+            text = result.value;
+        } else if (ext === '.pdf') {
+            const dataBuffer = fs.readFileSync(filePath);
+            const result = await pdfParse(dataBuffer);
+            text = result.text;
+        } else {
+            console.warn(`Unsupported file type: ${ext}`);
+            return null;
+        }
+
+        return text;
+    } catch (error) {
+        console.error(`Error extracting text from CV: ${filePath}`, error);
+        return null;
+    }
+};
 
 module.exports = { extractTextFromCV };
 
@@ -1289,270 +895,9 @@ async function generateFailedCSV(failedRecords) {
 // Helper to compare work experience entries
 
 
-// router.post('/bulk-upload', isAdmin, upload.single('file'), async (req, res) => {
-//     // ... (keep all the comparison helper functions as they are)
-
-//     try {
-//         if (!req.file) {
-//             return res.status(400).json({ error: "CSV file is required" });
-//         }
-
-//         const adminId = req.admin._id;
-//         const adminDetails = await User.findById(adminId);
-//         if (!adminDetails) {
-//             return res.status(404).json({ error: "Admin not found" });
-//         }
-
-//         const results = [];
-//         const failedRecords = [];
-//         let processedCount = 0;
-
-//         // Parse CSV file
-//         await new Promise((resolve, reject) => {
-//             fs.createReadStream(req.file.path)
-//                 .pipe(csv())
-//                 .on('data', (data) => results.push(data))
-//                 .on('end', resolve)
-//                 .on('error', reject);
-//         });
-
-//         // Batch processing with delays
-//         const batchSize = 2; // Process 10 CVs at a time
-//         const delayBetweenBatches = 30000; // 30 seconds delay between batches
-
-//         const processRecord = async (row) => {
-//             const recordResult = {
-//                 MOD_ID: row.MOD_ID,
-//                 CV_URL: row.CV_URL || null,
-//                 success: false,
-//                 errors: []
-//             };
-
-//             try {
-//                 const { MOD_ID, CV_URL } = row;
-//                 if (!MOD_ID || !CV_URL) {
-//                     throw new Error("Missing MOD_ID or CV_URL");
-//                 }
-//                 console.log(`Processing CV for MOD_ID: ${MOD_ID}`);
-
-//                 // 1. Download CV
-//                 const savedFilePath = await downloadFile(CV_URL, MOD_ID);
-//                 if (!savedFilePath) {
-//                     throw new Error("Failed to download CV");
-//                 }
-
-//                 // 2. Extract text from CV
-//                 const extractedText = await extractTextFromCV(savedFilePath);
-//                 if (!extractedText) {
-//                     throw new Error("Failed to extract text from CV");
-//                 }
-
-//                 // 3. Convert to JSON using Gemini
-//                 const extractedData = await getJsonFromGemini(extractedText);
-//                 if (!extractedData) {
-//                     throw new Error("Failed to extract data from text");
-//                 }
-//                 console.log(extractedData);
-
-//                 // Get email from CV
-//                 const cvEmail = extractedData.personalInformation?.email;
-//                 if (!cvEmail) {
-//                     throw new Error("CV contains no email address - skipping");
-//                 }
-
-//                 // Check if MOD_ID exists
-//                 const existingUserWithMOD_ID = await User.findOne({ modId: MOD_ID });
-
-//                 if (existingUserWithMOD_ID) {
-//                     // CASE 1: Same MOD_ID, same email → DELETE AND RECREATE
-//                     if (existingUserWithMOD_ID.email === cvEmail) {
-//                         // Delete the existing record
-//                         await User.deleteOne({ modId: MOD_ID });
-
-//                         // Create new record with the same MOD_ID
-//                         await User.create({
-//                             firstName: adminDetails.firstName,
-//                             lastName: adminDetails.lastName,
-//                             email: cvEmail,
-//                             contactNo: adminDetails.contactNo,
-//                             role: 'user',
-//                             password: null,
-//                             modId: MOD_ID,
-//                             CV_URL: CV_URL,
-//                             adminId,
-//                             cvPath: savedFilePath,
-//                             extractText: extractedText,
-//                             personalInformation: {
-//                                 firstName: extractedData.personalInformation?.firstName || null,
-//                                 lastName: extractedData.personalInformation?.lastName || null,
-//                                 email: cvEmail,
-//                                 contactNo: extractedData.personalInformation?.contactNo || null,
-//                                 city: extractedData.personalInformation?.city || null,
-//                                 state: extractedData.personalInformation?.state || null,
-//                                 country: extractedData.personalInformation?.country || null,
-//                             },
-//                             about: {
-//                                 description: extractedData.about?.description || null,
-//                                 linkedInURL: extractedData.about?.linkedInURL || null,
-//                                 professionalTitle: extractedData.about?.professionalTitle || null,
-//                                 primaryRole: extractedData.about?.primaryRole || null,
-//                                 microsoftDynamicsExpertise: extractedData.about?.microsoftDynamicsExpertise || null,
-//                                 microsoftDynamicsProduct: extractedData.about?.microsoftDynamicsProduct || [],
-//                                 yearsOfExperience: extractedData.about?.yearsOfExperience || null
-//                             },
-//                             skills: extractedData.skills || [],
-//                             projectExperience: extractedData.projectExperience || [],
-//                             MicrosoftCertificates: extractedData.MicrosoftCertificates || [],
-//                             Qualification: extractedData.Qualification || [],
-//                             workExperience: extractedData.workExperience || []
-//                         });
-//                     } else {
-//                         // Same MOD_ID, different email → SKIP (as before)
-//                         throw new Error(`Cannot change email for MOD_ID ${MOD_ID} (current: ${existingUserWithMOD_ID.email}, new: ${cvEmail})`);
-//                     }
-//                 } else {
-//                     // CASE 2: Different MOD_ID, same email → DELETE OLD AND CREATE NEW
-//                     const existingUserWithEmail = await User.findOne({ email: cvEmail });
-
-//                     if (existingUserWithEmail) {
-//                         // Delete the existing record with the old MOD_ID
-//                         await User.deleteOne({ email: cvEmail });
-
-//                         // Create new record with the new MOD_ID
-//                         await User.create({
-//                             firstName: adminDetails.firstName,
-//                             lastName: adminDetails.lastName,
-//                             email: cvEmail,
-//                             contactNo: adminDetails.contactNo,
-//                             role: 'user',
-//                             password: null,
-//                             modId: MOD_ID,
-//                             CV_URL: CV_URL,
-//                             adminId,
-//                             cvPath: savedFilePath,
-//                             extractText: extractedText,
-//                             personalInformation: {
-//                                 firstName: extractedData.personalInformation?.firstName || null,
-//                                 lastName: extractedData.personalInformation?.lastName || null,
-//                                 email: cvEmail,
-//                                 contactNo: extractedData.personalInformation?.contactNo || null,
-//                                 city: extractedData.personalInformation?.city || null,
-//                                 state: extractedData.personalInformation?.state || null,
-//                                 country: extractedData.personalInformation?.country || null,
-//                             },
-//                             about: {
-//                                 description: extractedData.about?.description || null,
-//                                 linkedInURL: extractedData.about?.linkedInURL || null,
-//                                 professionalTitle: extractedData.about?.professionalTitle || null,
-//                                 primaryRole: extractedData.about?.primaryRole || null,
-//                                 microsoftDynamicsExpertise: extractedData.about?.microsoftDynamicsExpertise || null,
-//                                 microsoftDynamicsProduct: extractedData.about?.microsoftDynamicsProduct || [],
-//                                 yearsOfExperience: extractedData.about?.yearsOfExperience || null
-//                             },
-//                             skills: extractedData.skills || [],
-//                             projectExperience: extractedData.projectExperience || [],
-//                             MicrosoftCertificates: extractedData.MicrosoftCertificates || [],
-//                             Qualification: extractedData.Qualification || [],
-//                             workExperience: extractedData.workExperience || []
-//                         });
-//                     } else {
-//                         // CASE 3: New MOD_ID and new email → CREATE (as before)
-//                         await User.create({
-//                             firstName: adminDetails.firstName,
-//                             lastName: adminDetails.lastName,
-//                             email: cvEmail,
-//                             contactNo: adminDetails.contactNo,
-//                             role: 'user',
-//                             password: null,
-//                             modId: MOD_ID,
-//                             CV_URL: CV_URL,
-//                             adminId,
-//                             cvPath: savedFilePath,
-//                             extractText: extractedText,
-//                             personalInformation: {
-//                                 firstName: extractedData.personalInformation?.firstName || null,
-//                                 lastName: extractedData.personalInformation?.lastName || null,
-//                                 email: cvEmail,
-//                                 contactNo: extractedData.personalInformation?.contactNo || null,
-//                                 city: extractedData.personalInformation?.city || null,
-//                                 state: extractedData.personalInformation?.state || null,
-//                                 country: extractedData.personalInformation?.country || null,
-//                             },
-//                             about: {
-//                                 description: extractedData.about?.description || null,
-//                                 linkedInURL: extractedData.about?.linkedInURL || null,
-//                                 professionalTitle: extractedData.about?.professionalTitle || null,
-//                                 primaryRole: extractedData.about?.primaryRole || null,
-//                                 microsoftDynamicsExpertise: extractedData.about?.microsoftDynamicsExpertise || null,
-//                                 microsoftDynamicsProduct: extractedData.about?.microsoftDynamicsProduct || [],
-//                                 yearsOfExperience: extractedData.about?.yearsOfExperience || null
-//                             },
-//                             skills: extractedData.skills || [],
-//                             projectExperience: extractedData.projectExperience || [],
-//                             MicrosoftCertificates: extractedData.MicrosoftCertificates || [],
-//                             Qualification: extractedData.Qualification || [],
-//                             workExperience: extractedData.workExperience || []
-//                         });
-//                     }
-//                 }
-
-//                 recordResult.success = true;
-//                 processedCount++;
-//             } catch (error) {
-//                 console.error(`Error processing MOD_ID ${row.MOD_ID || 'unknown'}:`, error);
-//                 recordResult.errors.push(error.message);
-//                 failedRecords.push(recordResult);
-//             }
-
-//             return recordResult;
-//         };
-
-//         // Process in batches with delays
-//         for (let i = 0; i < results.length; i += batchSize) {
-//             const batch = results.slice(i, i + batchSize);
-
-//             // Process current batch
-//             await Promise.all(batch.map(processRecord));
-
-//             // Add delay if there are more batches to process
-//             if (i + batchSize < results.length) {
-//                 console.log(`Processed ${i + batchSize} records. Waiting ${delayBetweenBatches / 1000} seconds before next batch...`);
-//                 await new Promise(resolve => setTimeout(resolve, delayBetweenBatches));
-//             }
-//         }
-
-//         // Generate failed records CSV if there are failed entries
-//         let failedCsvData = null;
-//         if (failedRecords.length > 0) {
-//             const failedCsvData = await generateFailedCSV(failedRecords);
-
-//             res.setHeader('Content-Type', 'text/csv');
-//             res.setHeader('Content-Disposition', `attachment; filename="failed_records_${Date.now()}.csv"`);
-
-//             // End the response with CSV data
-//             return res.end(failedCsvData); // Using end() ensures no JSON conversion
-//         }
-//         res.status(200).json({
-//             message: "Bulk upload processed",
-//             stats: {
-//                 total: results.length,
-//                 success: processedCount,
-//                 failed: failedRecords.length,
-//             },
-//             // failedRecords: failedRecords.length > 0 ? failedRecords : undefined,
-//             // failedCsvPath: failedCsvPath ? `/downloads/${failedCsvPath}` : null
-//         });
-
-//     } catch (err) {
-//         console.error("Error in bulk upload:", err);
-//         res.status(500).json({
-//             error: "Internal Server Error",
-//             details: err.message
-//         });
-//     }
-// });
-
 router.post('/bulk-upload', isAdmin, upload.single('file'), async (req, res) => {
+    // ... (keep all the comparison helper functions as they are)
+
     try {
         if (!req.file) {
             return res.status(400).json({ error: "CSV file is required" });
@@ -1577,7 +922,10 @@ router.post('/bulk-upload', isAdmin, upload.single('file'), async (req, res) => 
                 .on('error', reject);
         });
 
-        // Process records with better error handling
+        // Batch processing with delays
+        const batchSize = 2; // Process 10 CVs at a time
+        const delayBetweenBatches = 30000; // 30 seconds delay between batches
+
         const processRecord = async (row) => {
             const recordResult = {
                 MOD_ID: row.MOD_ID,
@@ -1591,7 +939,6 @@ router.post('/bulk-upload', isAdmin, upload.single('file'), async (req, res) => 
                 if (!MOD_ID || !CV_URL) {
                     throw new Error("Missing MOD_ID or CV_URL");
                 }
-
                 console.log(`Processing CV for MOD_ID: ${MOD_ID}`);
 
                 // 1. Download CV
@@ -1600,85 +947,220 @@ router.post('/bulk-upload', isAdmin, upload.single('file'), async (req, res) => 
                     throw new Error("Failed to download CV");
                 }
 
-                // 2. Extract text from CV with enhanced error handling
-                let extractedText;
-        try {
-            extractedText = await extractTextFromCV(savedFilePath);
-            console.log(`Successfully extracted text for MOD_ID ${MOD_ID}, length: ${extractedText.length}`);
-        } catch (extractError) {
-            recordResult.errors.push(`CV extraction failed: ${extractError.message}`);
-            throw extractError;
-        }
-//3
-        let extractedData;
-        try {
-            extractedData = await getJsonFromGemini(extractedText);
-            if (!extractedData) {
-                recordResult.errors.push("Received empty data from Gemini");
-                throw new Error("Empty data from Gemini");
-            }
-            console.log(`Successfully processed MOD_ID ${MOD_ID} with Gemini`);
-        } catch (geminiError) {
-            recordResult.errors.push(`Gemini processing failed: ${geminiError.message}`);
-            throw geminiError;
-        }
+                // 2. Extract text from CV
+                const extractedText = await extractTextFromCV(savedFilePath);
+                if (!extractedText) {
+                    throw new Error("Failed to extract text from CV");
+                }
 
-                // Rest of your processing logic...
-                // [Keep your existing user creation/update logic here]
+                // 3. Convert to JSON using Gemini
+                const extractedData = await getJsonFromGemini(extractedText);
+                if (!extractedData) {
+                    throw new Error("Failed to extract data from text");
+                }
+                console.log(extractedData);
+                
+                // Get email from CV
+                const cvEmail = extractedData.personalInformation?.email;
+                if (!cvEmail) {
+                    throw new Error("CV contains no email address - skipping");
+                }
+
+                // Check if MOD_ID exists
+                const existingUserWithMOD_ID = await User.findOne({ modId: MOD_ID });
+
+                if (existingUserWithMOD_ID) {
+                    // CASE 1: Same MOD_ID, same email → DELETE AND RECREATE
+                    if (existingUserWithMOD_ID.email === cvEmail) {
+                        // Delete the existing record
+                        await User.deleteOne({ modId: MOD_ID });
+                        
+                        // Create new record with the same MOD_ID
+                        await User.create({
+                            firstName: adminDetails.firstName,
+                            lastName: adminDetails.lastName,
+                            email: cvEmail,
+                            contactNo: adminDetails.contactNo,
+                            role: 'user',
+                            password: null,
+                            modId: MOD_ID,
+                            CV_URL: CV_URL,
+                            adminId,
+                            cvPath: savedFilePath,
+                            extractText: extractedText,
+                            personalInformation: {
+                                firstName: extractedData.personalInformation?.firstName || null,
+                                lastName: extractedData.personalInformation?.lastName || null,
+                                email: cvEmail,
+                                contactNo: extractedData.personalInformation?.contactNo || null,
+                                city: extractedData.personalInformation?.city || null,
+                                state: extractedData.personalInformation?.state || null,
+                                country: extractedData.personalInformation?.country || null,
+                            },
+                            about: {
+                                description: extractedData.about?.description || null,
+                                linkedInURL: extractedData.about?.linkedInURL || null,
+                                professionalTitle: extractedData.about?.professionalTitle || null,
+                                primaryRole: extractedData.about?.primaryRole || null,
+                                microsoftDynamicsExpertise: extractedData.about?.microsoftDynamicsExpertise || null,
+                                microsoftDynamicsProduct: extractedData.about?.microsoftDynamicsProduct || [],
+                                yearsOfExperience: extractedData.about?.yearsOfExperience || null
+                            },
+                            skills: extractedData.skills || [],
+                            projectExperience: extractedData.projectExperience || [],
+                            MicrosoftCertificates: extractedData.MicrosoftCertificates || [],
+                            Qualification: extractedData.Qualification || [],
+                            workExperience: extractedData.workExperience || []
+                        });
+                    } else {
+                        // Same MOD_ID, different email → SKIP (as before)
+                        throw new Error(`Cannot change email for MOD_ID ${MOD_ID} (current: ${existingUserWithMOD_ID.email}, new: ${cvEmail})`);
+                    }
+                } else {
+                    // CASE 2: Different MOD_ID, same email → DELETE OLD AND CREATE NEW
+                    const existingUserWithEmail = await User.findOne({ email: cvEmail });
+
+                    if (existingUserWithEmail) {
+                        // Delete the existing record with the old MOD_ID
+                        await User.deleteOne({ email: cvEmail });
+                        
+                        // Create new record with the new MOD_ID
+                        await User.create({
+                            firstName: adminDetails.firstName,
+                            lastName: adminDetails.lastName,
+                            email: cvEmail,
+                            contactNo: adminDetails.contactNo,
+                            role: 'user',
+                            password: null,
+                            modId: MOD_ID,
+                            CV_URL: CV_URL,
+                            adminId,
+                            cvPath: savedFilePath,
+                            extractText: extractedText,
+                            personalInformation: {
+                                firstName: extractedData.personalInformation?.firstName || null,
+                                lastName: extractedData.personalInformation?.lastName || null,
+                                email: cvEmail,
+                                contactNo: extractedData.personalInformation?.contactNo || null,
+                                city: extractedData.personalInformation?.city || null,
+                                state: extractedData.personalInformation?.state || null,
+                                country: extractedData.personalInformation?.country || null,
+                            },
+                            about: {
+                                description: extractedData.about?.description || null,
+                                linkedInURL: extractedData.about?.linkedInURL || null,
+                                professionalTitle: extractedData.about?.professionalTitle || null,
+                                primaryRole: extractedData.about?.primaryRole || null,
+                                microsoftDynamicsExpertise: extractedData.about?.microsoftDynamicsExpertise || null,
+                                microsoftDynamicsProduct: extractedData.about?.microsoftDynamicsProduct || [],
+                                yearsOfExperience: extractedData.about?.yearsOfExperience || null
+                            },
+                            skills: extractedData.skills || [],
+                            projectExperience: extractedData.projectExperience || [],
+                            MicrosoftCertificates: extractedData.MicrosoftCertificates || [],
+                            Qualification: extractedData.Qualification || [],
+                            workExperience: extractedData.workExperience || []
+                        });
+                    } else {
+                        // CASE 3: New MOD_ID and new email → CREATE (as before)
+                        await User.create({
+                            firstName: adminDetails.firstName,
+                            lastName: adminDetails.lastName,
+                            email: cvEmail,
+                            contactNo: adminDetails.contactNo,
+                            role: 'user',
+                            password: null,
+                            modId: MOD_ID,
+                            CV_URL: CV_URL,
+                            adminId,
+                            cvPath: savedFilePath,
+                            extractText: extractedText,
+                            personalInformation: {
+                                firstName: extractedData.personalInformation?.firstName || null,
+                                lastName: extractedData.personalInformation?.lastName || null,
+                                email: cvEmail,
+                                contactNo: extractedData.personalInformation?.contactNo || null,
+                                city: extractedData.personalInformation?.city || null,
+                                state: extractedData.personalInformation?.state || null,
+                                country: extractedData.personalInformation?.country || null,
+                            },
+                            about: {
+                                description: extractedData.about?.description || null,
+                                linkedInURL: extractedData.about?.linkedInURL || null,
+                                professionalTitle: extractedData.about?.professionalTitle || null,
+                                primaryRole: extractedData.about?.primaryRole || null,
+                                microsoftDynamicsExpertise: extractedData.about?.microsoftDynamicsExpertise || null,
+                                microsoftDynamicsProduct: extractedData.about?.microsoftDynamicsProduct || [],
+                                yearsOfExperience: extractedData.about?.yearsOfExperience || null
+                            },
+                            skills: extractedData.skills || [],
+                            projectExperience: extractedData.projectExperience || [],
+                            MicrosoftCertificates: extractedData.MicrosoftCertificates || [],
+                            Qualification: extractedData.Qualification || [],
+                            workExperience: extractedData.workExperience || []
+                        });
+                    }
+                }
 
                 recordResult.success = true;
                 processedCount++;
             } catch (error) {
-                console.error(`Complete error for MOD_ID ${row.MOD_ID}:`, error);
+                console.error(`Error processing MOD_ID ${row.MOD_ID || 'unknown'}:`, error);
+                recordResult.errors.push(error.message);
                 failedRecords.push(recordResult);
             }
-        
+
             return recordResult;
         };
 
-
-        // Process records with concurrency control
-        const BATCH_SIZE = 2;
-        const DELAY_BETWEEN_BATCHES = 5000; // 5 seconds
-        
-        for (let i = 0; i < results.length; i += BATCH_SIZE) {
-            const batch = results.slice(i, i + BATCH_SIZE);
+        // Process in batches with delays
+        for (let i = 0; i < results.length; i += batchSize) {
+            const batch = results.slice(i, i + batchSize);
+            
+            // Process current batch
             await Promise.all(batch.map(processRecord));
             
-            if (i + BATCH_SIZE < results.length) {
-                await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_BATCHES));
+            // Add delay if there are more batches to process
+            if (i + batchSize < results.length) {
+                console.log(`Processed ${i + batchSize} records. Waiting ${delayBetweenBatches/1000} seconds before next batch...`);
+                await new Promise(resolve => setTimeout(resolve, delayBetweenBatches));
             }
         }
 
-        // Generate failed CSV if needed
-        if (failedRecords.length > 0) {
-            const failedCsv = await generateFailedCSV(failedRecords);
-            return res.status(207).json({
-                message: "Bulk upload completed with some failures",
-                success: processedCount > 0,
-                processed: processedCount,
+         // Generate failed records CSV if there are failed entries
+    let failedCsvData = null;
+    if (failedRecords.length > 0) {
+        const failedCsvData = await generateFailedCSV(failedRecords);
+        
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', `attachment; filename="failed_records_${Date.now()}.csv"`);
+        
+        // End the response with CSV data
+        return res.end(failedCsvData); // Using end() ensures no JSON conversion
+      }
+           res.status(200).json({
+            message: "Bulk upload processed",
+            stats: {
+                total: results.length,
+                success: processedCount,
                 failed: failedRecords.length,
-                failedCsvUrl: `/downloads/${failedCsv}`
-            });
-        }
-
-        return res.status(200).json({
-            message: "Bulk upload completed successfully",
-            processed: processedCount
+            },
+            // failedRecords: failedRecords.length > 0 ? failedRecords : undefined,
+            // failedCsvPath: failedCsvPath ? `/downloads/${failedCsvPath}` : null
         });
 
     } catch (err) {
-        console.error("Bulk upload error:", err);
-        return res.status(500).json({
-            error: "Internal server error",
-            details: process.env.NODE_ENV === 'development' ? err.message : undefined
+        console.error("Error in bulk upload:", err);
+        res.status(500).json({
+            error: "Internal Server Error",
+            details: err.message
         });
     }
 });
 
 async function generateFailedCSV(failedRecords) {
     // Filter out completely empty records if needed
-    const validRecords = failedRecords.filter(r =>
+    const validRecords = failedRecords.filter(r => 
         r.MOD_ID || r.CV_URL || (r.errors && r.errors.length)
     );
 
@@ -1990,8 +1472,8 @@ router.put("/updateSkills", authenticateToken, async (req, res) => {
         user.skills = skills;
         await user.save();
 
-        res.status(200).send({
-            message: "Skills updated successfully",
+        res.status(200).send({ 
+            message: "Skills updated successfully", 
             user: {
                 ...user.toObject(),
                 skills: user.skills
@@ -2713,71 +2195,127 @@ router.put('/upload-cv', authenticateToken, upload.single('file'), async (req, r
 
 // ATS Score Calculator Functions
 // Helper function to calculate keyword match using TF-IDF
-async function extractJDInfo(jobDescription) {
+const extractJDInfo = async (jobDescription) => {
     try {
-        const settings = await Settings.getCurrentSettings();
         const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
 
-        const safePrompt = sanitizeForGemini(settings.jdExtractionPrompt);
-        const safeJobDescription = sanitizeForGemini(jobDescription);
+        const prompt = `You are an advanced job description parser with keyword extraction capabilities. Analyze the job description and extract the following information:
 
-        // 🚨 SANITIZE AFTER COMBINING
-        const finalPrompt = sanitizeForGemini(`${safePrompt}\n\nJob Description:\n${safeJobDescription}`);
-
-        const response = await model.generateContent(finalPrompt);
-        const result = response.response;
-
-        if (!result || !result.text) {
-            throw new Error("Invalid response from Gemini API");
+        1. Required Skills (Technical/Hard Skills Only):
+           - Extract as an array of specific technical skills
+           - Focus on tools, technologies, programming languages, and methodologies
+           - Include both explicit mentions and implied requirements
+           - Example: ["D365 CRM", "Power Apps", ".NET Core", "Azure Functions"]
+        
+        2. Years of Experience:
+           - Extract exact number when mentioned (e.g., "5+ years" → 5)
+           - Infer from seniority terms:
+             * "Junior": 1-3 years
+             * "Mid-level": 3-5 years  
+             * "Senior": 5+ years
+             * "Lead/Principal": 7+ years
+           - Default to 0 if unclear
+        
+        3. Education Level:
+           - Extract exact degrees mentioned (normalize formats):
+             * Bachelor's/B.Tech/B.E./B.Sc → "bachelors"
+             * Master's/M.Tech/M.Sc → "masters"  
+             * PhD → "phd"
+             * Diploma → "diploma"
+           - Infer from context if implied but not stated
+           - Default to "not specified"
+        
+        4. Keywords Match (For ATS Optimization):
+           - Extract 3 types of keywords:
+             a) Primary Skills: Core technical competencies (e.g., "D365", "Power Platform")
+             b) Secondary Skills: Nice-to-have technologies (e.g., "Azure DevOps")
+             c) Behavioral Traits: Soft skills/attributes (e.g., "team player", "problem-solving")
+           - Return as separate arrays for scoring purposes
+        
+        Response Format (Strict JSON):
+        {
+          "skills": ["skill1", "skill2"],
+          "yearsOfExperience": 5,
+          "education": "bachelors",
+          "keywords": {
+            "primary": ["core_skill1", "core_skill2"],
+            "secondary": ["secondary_skill1"],
+            "behavioral": ["communication", "leadership"] 
+          }
         }
+        
+        Processing Rules:
+        1. Always return valid JSON - use null/empty arrays for missing data
+        2. Normalize skill names (e.g., "MS Dynamics" → "Dynamics 365")
+        3. Include synonyms and equivalent technologies
+        4. For education, prefer the highest mentioned degree
+        5. Keywords should be extracted verbatim but deduplicated
+        
+        Job Description to Parse:
+        "${jobDescription}"`;
 
-        let jsonString = result.text();
-        jsonString = jsonString.replace(/```json|```/gi, '').trim(); // Remove markdown code block markers
+        const result = await model.generateContent(prompt);
+        const response = await result.response;
+        const text = response.text();
 
+        // Log the raw response for debugging
+        console.log("Raw Gemini Response:", text);
+
+        // Remove Markdown formatting (e.g., ```json and ```) and clean up
+        const jsonString = text
+            .replace(/```json/g, "")
+            .replace(/```/g, "")
+            .replace(/\n/g, "") // Remove newlines that might break JSON
+            .trim();
+
+        // Log the cleaned JSON string
+        console.log("Cleaned JSON String:", jsonString);
+
+        // Parse the cleaned JSON string
+        let jdInfo;
         try {
-            return JSON.parse(jsonString);
-        } catch (error) {
-            console.warn("Initial JSON parse failed.");
-            console.warn("Received raw response text from Gemini:", jsonString);
-            
-            let fixedJsonString = jsonString
-                .replace(/,\s*([\]}])/g, '$1') // Remove trailing commas
-                .replace(/(\r\n|\n|\r)/gm, ''); // Remove newlines
-
-            try {
-                return JSON.parse(fixedJsonString);
-            } catch (finalError) {
-                console.error("Failed to fix and parse JSON:", finalError.message);
-                console.error("Problematic final text after fixing:", fixedJsonString);
-                throw new Error("Failed to parse Gemini response even after attempting to fix formatting.");
-            }
+            jdInfo = JSON.parse(jsonString);
+        } catch (parseError) {
+            console.error("JSON Parse Error:", parseError.message);
+            // Fallback: Manually extract basic info if JSON parsing fails
+            jdInfo = {
+                skills: extractSkillsFallback(jobDescription),
+                yearsOfExperience: extractYearsFallback(jobDescription),
+                education: "not specified"
+            };
         }
+
+        // Validate and normalize the output
+        jdInfo.skills = Array.isArray(jdInfo.skills) ? jdInfo.skills : jdInfo.skills.split(",").map(s => s.trim());
+        jdInfo.yearsOfExperience = Number(jdInfo.yearsOfExperience) || 0;
+        jdInfo.education = jdInfo.education || "not specified";
+
+        console.log("Final JD Info:", jdInfo);
+        return jdInfo;
     } catch (error) {
-        console.error("Error extracting JD info:", error.message || error);
-        throw error;
+        console.error("Error extracting JD info:", error.message);
+        return null;
     }
-}
-
-
+};
 
 
 
 const calculateKeywordMatch = (resumeText, jobDescription) => {
     try {
         if (!resumeText || !jobDescription) return 0;
-
+        
         const tfidf = new TfIdf();
         tfidf.addDocument(resumeText.toLowerCase());
-
+        
         const jobKeywords = jobDescription.toLowerCase().split(/\W+/).filter(k => k.length > 2);
         if (jobKeywords.length === 0) return 0;
-
+        
         let matches = 0;
         jobKeywords.forEach(keyword => {
             const score = tfidf.tfidf(keyword, 0);
             if (score > 0) matches++;
         });
-
+        
         return (matches / jobKeywords.length) * 100;
     } catch (error) {
         console.error('Error in calculateKeywordMatch:', error);
@@ -2794,16 +2332,16 @@ const calculateSkillsMatch = (resumeSkills, requiredSkills) => {
 
         let matches = 0;
         requiredSkills.forEach(skill => {
-            if (resumeSkills.some(resumeSkill =>
+            if (resumeSkills.some(resumeSkill => 
                 natural.JaroWinklerDistance(
-                    String(resumeSkill).toLowerCase(),
+                    String(resumeSkill).toLowerCase(), 
                     String(skill).toLowerCase()
                 ) > 0.8
             )) {
                 matches++;
             }
         });
-
+        
         return (matches / requiredSkills.length) * 100;
     } catch (error) {
         console.error('Error in calculateSkillsMatch:', error);
@@ -2815,13 +2353,13 @@ const calculateSkillsMatch = (resumeSkills, requiredSkills) => {
 const calculateExperienceScore = (workExperience, requiredYearsOfExperience) => {
     try {
         if (!Array.isArray(workExperience) || !requiredYearsOfExperience) return 0;
-
+        
         let totalYears = workExperience.reduce((years, exp) => {
             if (!exp?.startDate) return years;
-
+            
             const startDate = new Date(exp.startDate);
             let endDate;
-
+            
             if (exp.currentlyWorking) {
                 endDate = new Date();
             } else if (exp.endDate) {
@@ -2829,13 +2367,13 @@ const calculateExperienceScore = (workExperience, requiredYearsOfExperience) => 
             } else {
                 endDate = startDate;
             }
-
+            
             const yearDiff = (endDate.getFullYear() - startDate.getFullYear()) +
-                (endDate.getMonth() - startDate.getMonth()) / 12;
-
+                           (endDate.getMonth() - startDate.getMonth()) / 12;
+            
             return years + (yearDiff > 0 ? yearDiff : 0);
         }, 0);
-
+        
         return Math.min(100, (totalYears / requiredYearsOfExperience) * 100);
     } catch (error) {
         console.error('Error in calculateExperienceScore:', error);
@@ -2975,23 +2513,55 @@ const calculateATSScore = (resume, jdInfo) => {
 // Function to get AI-powered feedback from Gemini API
 const getGeminiFeedback = async (resumeText, jobDescription) => {
     try {
-        const settings = await Settings.getCurrentSettings();
         const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
 
-        // Combine the prompt from settings with the texts directly
-        const prompt = `${settings.feedbackPrompt}\n\nResume:\n${resumeText}\n\nJob Description:\n${jobDescription}`;
+        const prompt = `
+            You are ResumeChecker, an expert in ATS optimization and resume tailoring. Analyze the following resume and job description, and provide **clear, structured, and actionable feedback** that is easy for HR professionals and non-technical reviewers to understand. Follow this format:
 
-        const response = await model.generateContent(prompt);
-        const result = response.response;
+            1. **Missing Keywords:**
+            - Identify the top 5-10 keywords from the job description that are missing in the resume.
+            - Suggest specific places in the resume where these keywords can be naturally incorporated.
+            - add suggestion for workExperince clearly for each entry
+            - suggestion for projectExperince clearly for each entry  
 
-        if (!result || !result.text) {
-            throw new Error("Invalid response from Gemini API");
-        }
+            2. **Reformatting Suggestions:**
+            - Provide specific recommendations to improve ATS readability, such as:
+                - Consistent formatting (e.g., font, headings, bullet points).
+                - Date formats (e.g., use YYYY-MM-DD).
+                - Section organization (e.g., skills, experience, education).
+            - Highlight any formatting issues that could confuse ATS systems.
 
-        return result.text();
+            3. **Keyword Density Optimization:**
+            - Suggest ways to improve keyword density without keyword stuffing.
+            - Provide examples of how to naturally include missing keywords in the professional summary, work experience, and skills sections.
+
+            4. **Tailoring the Resume:**
+            - Provide 3-5 specific bullet points on how to tailor the resume for this job description. For example:
+                - Highlight relevant experience and skills.
+                - Quantify achievements using metrics (e.g., "Increased sales by 20%").
+                - Align the resume with the company's values or mission (if mentioned in the job description).
+
+            5. **General Improvements:**
+            - Suggest any additional improvements to make the resume stand out, such as:
+                - Adding a strong professional summary.
+                - Removing irrelevant information.
+                - Using action verbs and quantifiable results.
+
+            Resume text: ${resumeText}
+            Job description: ${jobDescription}
+
+            Provide your feedback in a clear, structured, and actionable format. Avoid generic advice and focus on specific changes that will improve the resume's ATS compatibility and overall quality.
+            `;
+
+        const result = await model.generateContent(prompt);
+        const response = await result.response;
+        const text = response.text();
+
+        console.log("Gemini API Response:", text);
+        return text;
     } catch (error) {
-        console.error("Error getting Gemini feedback:", error);
-        throw error;
+        console.error("Gemini API Error:", error.message);
+        return null;
     }
 };
 
@@ -3000,11 +2570,11 @@ router.get('/search', async (req, res) => {
     try {
         console.log("🔍 Received Search Request with Query Params:", req.query);
         const { keywords } = req.query;
-
+        
         if (!keywords) {
-            return res.status(400).json({
+            return res.status(400).json({ 
                 message: "Keywords are required.",
-                success: false
+                success: false 
             });
         }
 
@@ -3012,11 +2582,11 @@ router.get('/search', async (req, res) => {
         const keywordArray = keywords.split(',')
             .map(k => k.trim())
             .filter(k => k.length > 0);
-
+        
         if (keywordArray.length === 0) {
-            return res.status(400).json({
+            return res.status(400).json({ 
                 message: "No valid keywords provided.",
-                success: false
+                success: false 
             });
         }
 
@@ -3031,7 +2601,7 @@ router.get('/search', async (req, res) => {
         }));
 
         // Combine conditions with $and to ensure all keywords are matched
-        const query = searchConditions.length > 1
+        const query = searchConditions.length > 1 
             ? { $and: searchConditions }
             : searchConditions[0];
 
@@ -3048,9 +2618,9 @@ router.get('/search', async (req, res) => {
         ]).lean();
 
         if (!users || users.length === 0) {
-            return res.status(404).json({
+            return res.status(404).json({ 
                 message: "No matching candidates found.",
-                success: false
+                success: false 
             });
         }
 
@@ -3083,10 +2653,10 @@ router.get('/search', async (req, res) => {
 
     } catch (error) {
         console.error("Search Error:", error);
-        return res.status(500).json({
+        return res.status(500).json({ 
             message: "An error occurred while searching",
             success: false,
-            error: error.message
+            error: error.message 
         });
     }
 });
@@ -3690,11 +3260,11 @@ router.get("/generate-cv/:userId", async (req, res) => {
     try {
         const userId = req.params.userId;
         const pdfPath = await generateCV(userId);
-
+        
         // Set headers for direct download
         res.setHeader('Content-Type', 'application/pdf');
         res.setHeader('Content-Disposition', `attachment; filename=LiveD365_Resume.pdf`);
-
+        
         // Send the file directly
         return res.sendFile(pdfPath);
     } catch (error) {
@@ -3706,12 +3276,12 @@ router.get("/generate-cv/:userId", async (req, res) => {
 const calculateFuzzyScore = (text, keyword) => {
     try {
         if (!text || !keyword) return 0;
-
+        
         const safeText = safeString(text);
         const safeKeyword = safeString(keyword);
-
+        
         if (!safeText || !safeKeyword) return 0;
-
+        
         const score = fuzzball.ratio(safeText, safeKeyword);
         return isNaN(score) ? 0 : score;
     } catch (error) {
@@ -3836,21 +3406,19 @@ const getCachedJDInfo = async (jobDescription, extractFunction) => {
 // Get user by ID
 router.get("/user/:userId", authenticateToken, async (req, res) => {
     try {
-        const userId = req.params.userId;
-        console.log('Fetching user data for ID:', userId); // Debug log
+        const userId = req.user.userId; // Get userId from the authenticated token
+        console.log('Fetching user data for ID:', userId);
 
         const user = await User.findById(userId);
-
         if (!user) {
-            console.log('User not found for ID:', userId); // Debug log
+            console.log('User not found for ID:', userId);
             return res.status(404).json({ error: "User not found" });
         }
 
-        console.log('User found:', user._id); // Debug log (only log the ID for security)
-        res.status(200).json({
+        res.status(200).json({ 
             message: "User data retrieved successfully",
             user: {
-                _id: user._id,
+                _id: user._id.toString(),
                 email: user.email,
                 firstName: user.firstName,
                 lastName: user.lastName,
@@ -3867,59 +3435,6 @@ router.get("/user/:userId", authenticateToken, async (req, res) => {
     } catch (error) {
         console.error("Error fetching user:", error);
         res.status(500).json({ error: "Internal server error" });
-    }
-});
-
-// Get current settings
-router.get("/settings", isAdmin, async (req, res) => {
-    try {
-        const settings = await Settings.getCurrentSettings();
-        // Don't send the actual API key to frontend for security
-        const sanitizedSettings = {
-            ...settings.toObject(),
-            geminiApiKey: settings.geminiApiKey ? '••••••••' + settings.geminiApiKey.slice(-4) : ''
-        };
-        res.json({ success: true, settings: sanitizedSettings });
-    } catch (error) {
-        console.error('Error fetching settings:', error);
-        res.status(500).json({ success: false, error: 'Failed to fetch settings' });
-    }
-});
-
-
-// Update settings
-router.put("/settings", isAdmin, async (req, res) => {
-    try {
-        const { geminiApiKey, jsonExtractionPrompt, jdExtractionPrompt, feedbackPrompt } = req.body;
-
-        // Update settings in database
-        const settings = await Settings.findOneAndUpdate(
-            {},
-            {
-                geminiApiKey,
-                jsonExtractionPrompt,
-                jdExtractionPrompt,
-                feedbackPrompt,
-                updatedAt: new Date()
-            },
-            { new: true, upsert: true }
-        );
-
-        // Update the genAI instance with new API key
-        if (geminiApiKey) {
-            updateGenAI(geminiApiKey);
-        }
-
-        res.json({
-            success: true,
-            settings: {
-                ...settings.toObject(),
-                geminiApiKey: '••••••••' // Mask API key in response
-            }
-        });
-    } catch (error) {
-        console.error('Error updating settings:', error);
-        res.status(500).json({ success: false, error: 'Failed to update settings' });
     }
 });
 

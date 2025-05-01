@@ -7,17 +7,19 @@ const API = axios.create({
   withCredentials: true,
 });
 
-// Add request interceptor for authentication
-API.interceptors.request.use((config) => {
-  const token = localStorage.getItem('token');
-  
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`;
+// Add request interceptor to include token
+API.interceptors.request.use(
+  (config) => {
+    const token = localStorage.getItem('token');
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
+  },
+  (error) => {
+    return Promise.reject(error);
   }
-  return config;
-}, (error) => {
-  return Promise.reject(error);
-});
+);
 
 // Add response interceptor for handling auth errors
 API.interceptors.response.use(
@@ -39,8 +41,7 @@ export const verifyCode = (email, code) => API.post('/verify-code', { email, cod
 export const loginUser = async (credentials) => {
   try {
     const response = await API.post('/login', credentials);
-    console.log("Login Response:", response.data);
-    return response.data;
+    return response;
   } catch (error) {
     console.error("Login API Error:", error.response?.data || error.message);
     throw error;
@@ -130,23 +131,5 @@ export const updateWorkExperience = (data) => API.put('/updateWorkExperience', d
 export const updateProjectExperience = (data) => API.put('/updateProject', data);
 export const updateQualifications = (data) => API.put('/updateQualifications', data);
 export const updateMicrosoftCertificates = (data) => API.put('/updateMicrosoftCertificate', data);
-
-export const fetchSettings = async () => {
-    try {
-        const response = await API.get('/settings');
-        return response.data;
-    } catch (error) {
-        throw new Error(error.response?.data?.error || error.message || 'Failed to fetch settings');
-    }
-};
-
-export const updateSettings = async (settings) => {
-    try {
-        const response = await API.put('/settings', settings);
-        return response.data;
-    } catch (error) {
-        throw new Error(error.response?.data?.error || error.message || 'Failed to update settings');
-    }
-};
 
 export default API;

@@ -219,12 +219,11 @@ const userSchema = new mongoose.Schema({
         yearsOfExperience: { type: String, default: null }
     },
 
-    // skills: [{ type: String, default: null }],
-
     skills: { 
         type: [String], 
         default: [] // Changed from null to empty array
       },
+      
     projectExperience: [{
         projectName: { type: String, default: null },
         jobTitle: { type: String, default: null },

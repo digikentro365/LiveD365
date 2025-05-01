@@ -31,39 +31,32 @@ const Login = () => {
 const handleSubmit = async (e) => {
     e.preventDefault();
     try {
-      const data = await loginUser(formData);
-      console.log("Full API Response:", data);
+      const { data } = await loginUser(formData);
+      
+      // Store token and user data
+      localStorage.setItem('token', data.user.token);
+      localStorage.setItem('user', JSON.stringify({
+        _id: data.user._id,
+        email: data.user.email,
+        firstName: data.user.firstName,
+        lastName: data.user.lastName,
+        role: data.user.role
+      }));
 
-      if (data && data.user) {
-        // Store token and user data
-        localStorage.setItem("token", data.user.token);
-        localStorage.setItem("user", JSON.stringify({
-          _id: data.user.id, // Make sure we use _id instead of id
-          email: data.user.email,
-          firstName: data.user.firstName,
-          lastName: data.user.lastName,
-          role: data.user.role
-        }));
-        console.log("Token stored in localStorage:", data.user.token);
-        console.log("User data stored:", localStorage.getItem("user"));
+      // Clear any existing errors
+      setError('');
 
-        // Clear any existing errors
-        setError('');
-
-        // Redirect based on user role
-        if (data.user.role === 'admin') {
-          navigate('/admin-dashboard');
-        } else {
-          navigate('/dashboard');
-        }
+      // Redirect based on user role
+      if (data.user.role === 'admin') {
+        navigate('/admin-dashboard');
       } else {
-        throw new Error("Invalid response format from server");
+        navigate('/dashboard');
       }
     } catch (err) {
       console.error("Login Error:", err);
-      setError(err.message || err.response?.data?.error || "Login failed");
+      setError(err.response?.data?.error || 'Login failed');
     }
-  };
+};
   
 
   return (

@@ -117,6 +117,7 @@ const Register = () => {
               fullWidth
               margin="normal"
               required
+              helperText="Password must contain at least 1 uppercase letter, 1 lowercase letter, 1 digit, and 1 special character"
             />
             <TextField
               label="Contact Number"
@@ -130,47 +131,34 @@ const Register = () => {
 
             {/* File Upload Section */}
             <Box sx={{ mt: 2, mb: 2 }}>
-              <Typography variant="subtitle1" gutterBottom>
-                Upload Resume (Optional - PDF or DOCX)
-              </Typography>
-              <label htmlFor="resume-upload">
-                <Input
-                  id="resume-upload"
-                  type="file"
-                  inputProps={{ 
-                    accept: '.pdf,.doc,.docx',
-                    style: { display: 'none' }
-                  }}
-                  onChange={handleFileChange}
-                />
+              <Input
+                type="file"
+                id="file-upload"
+                onChange={handleFileChange}
+                sx={{ display: 'none' }}
+                inputProps={{ accept: '.pdf,.doc,.docx' }}
+              />
+              <label htmlFor="file-upload">
                 <Button
                   variant="outlined"
                   component="span"
                   startIcon={<UploadFileIcon />}
                   fullWidth
                 >
-                  {file ? file.name : 'Choose File'}
+                  {file ? file.name : 'Upload CV (PDF/DOC/DOCX)'}
                 </Button>
               </label>
-              {file && (
-                <Typography variant="caption" display="block" sx={{ mt: 1 }}>
-                  Selected: {file.name} ({Math.round(file.size / 1024)} KB)
-                </Typography>
-              )}
             </Box>
 
-            <Button 
-              type="submit" 
-              variant="contained" 
-              fullWidth 
-              sx={{ mt: 3 }}
+            <Button
+              type="submit"
+              variant="contained"
+              fullWidth
+              sx={{ mt: 3, mb: 2 }}
             >
               Register
             </Button>
           </Box>
-          <Typography sx={{ mt: 2 }}>
-            Already have an account? <Button onClick={() => navigate('/login')}>Login</Button>
-          </Typography>
         </Paper>
       </Box>
     </Container>

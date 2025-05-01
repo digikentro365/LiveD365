@@ -20,8 +20,15 @@ const VerifyCode = () => {
     e.preventDefault();
     try {
       const { data } = await verifyCode(email, code);
+      // Store token and user data
       localStorage.setItem('token', data.token);
-      navigate('/dashboard');
+      localStorage.setItem('user', JSON.stringify(data.user));
+      // Navigate based on role
+      if (data.user.role === 'admin') {
+        navigate('/admin-dashboard');
+      } else {
+        navigate('/dashboard');
+      }
     } catch (err) {
       setError(err.response?.data?.error || 'Verification failed');
     }
@@ -37,39 +44,14 @@ const VerifyCode = () => {
           alignItems: 'center',
         }}
       >
-        <Box 
-          mb={1}
-          sx={{
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            gap: 1
-          }}
-        >
-          <img 
-            src="/lived365.png" 
-            alt="LiveD365 Logo" 
-            style={{ 
-              height: '50px',
-              width: 'auto',
-              marginBottom: '8px'
-            }} 
-          />
-          <Typography
-            variant="h5"
-            sx={{
-              color: '#2196F3',
-              fontWeight: 500
-            }}
-          >
-            LiveD365
-          </Typography>
-        </Box>
-        <Paper elevation={3} sx={{ p: 4, width: '100%' }}>
+        <Logo isAuth />
+        <Paper elevation={3} sx={{ p: 4, width: '100%', borderRadius: '8px' }}>
           <Typography variant="h4" gutterBottom>Verify Your Email</Typography>
-          <Typography>We've sent a verification code to {email}</Typography>
-          {error && <Typography color="error">{error}</Typography>}
-          <form onSubmit={handleSubmit}>
+          <Typography variant="body1" sx={{ mb: 2 }}>
+            We've sent a verification code to {email}
+          </Typography>
+          {error && <Typography color="error" sx={{ mb: 2 }}>{error}</Typography>}
+          <Box component="form" onSubmit={handleSubmit} sx={{ width: '100%' }}>
             <TextField
               label="Verification Code"
               value={code}
@@ -77,11 +59,17 @@ const VerifyCode = () => {
               fullWidth
               margin="normal"
               required
+              inputProps={{ maxLength: 4 }}
             />
-            <Button type="submit" variant="contained" fullWidth sx={{ mt: 3 }}>
+            <Button
+              type="submit"
+              variant="contained"
+              fullWidth
+              sx={{ mt: 3, mb: 2 }}
+            >
               Verify
             </Button>
-          </form>
+          </Box>
         </Paper>
       </Box>
     </Container>

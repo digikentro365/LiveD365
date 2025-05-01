@@ -27,10 +27,6 @@ import {
     Checkbox,
     AppBar,
     Toolbar,
-    Grid,
-    Divider,
-    IconButton,
-    Tooltip,
 } from "@mui/material";
 import {
   Search as SearchIcon,
@@ -38,10 +34,6 @@ import {
   Calculate as CalculateScoresIcon,
   Description as JDIcon,
   Logout as LogoutIcon,
-  Save as SaveIcon,
-  Visibility as VisibilityIcon,
-  VisibilityOff as VisibilityOffIcon,
-  Edit as EditIcon
 } from "@mui/icons-material";
 import {
     searchUsers,
@@ -85,52 +77,6 @@ const AdminDashboard = () => {
     const navigate = useNavigate();
     const fileInputRef = useRef(null);
 
-    const [settings, setSettings] = useState({
-        geminiApiKey: '',
-        jsonExtractionPrompt: '',
-        jdExtractionPrompt: '',
-        feedbackPrompt: ''
-    });
-    const [showApiKey, setShowApiKey] = useState(false);
-    const [isEditing, setIsEditing] = useState({
-        geminiApiKey: false,
-        jsonExtractionPrompt: false,
-        jdExtractionPrompt: false,
-        feedbackPrompt: false
-    });
-    const [saving, setSaving] = useState(false);
-
-    // Add useEffect to fetch settings on mount
-    useEffect(() => {
-        fetchSettings();
-    }, []);
-
-    const fetchSettings = async () => {
-        try {
-            setLoading(true);
-            const response = await fetch(`${import.meta.env.VITE_API_BASE_URL}/auth/settings`, {
-                headers: {
-                    'Authorization': `Bearer ${localStorage.getItem('token')}`
-                }
-            });
-            
-            if (!response.ok) {
-                const errorData = await response.json();
-                throw new Error(errorData.error || 'Failed to fetch settings');
-            }
-            
-            const data = await response.json();
-            if (data.success) {
-                setSettings(data.settings);
-            } else {
-                throw new Error(data.error || 'Failed to fetch settings');
-            }
-        } catch (error) {
-            showSnackbar(error.message, 'error');
-        } finally {
-            setLoading(false);
-        }
-    };
 
     // In your AdminDashboard.jsx
     useEffect(() => {
@@ -516,45 +462,6 @@ const AdminDashboard = () => {
         }
     };
 
-    const handleSaveSettings = async () => {
-        try {
-            setSaving(true);
-            const response = await fetch(`${import.meta.env.VITE_API_BASE_URL}/auth/settings`, {
-                method: 'PUT',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${localStorage.getItem('token')}`
-                },
-                body: JSON.stringify(settings)
-            });
-
-            if (!response.ok) throw new Error('Failed to update settings');
-
-            const data = await response.json();
-            if (data.success) {
-                showSnackbar('Settings updated successfully', 'success');
-                setSettings(data.settings);
-                // Reset editing state
-                setIsEditing({
-                    geminiApiKey: false,
-                    jsonExtractionPrompt: false,
-                    jdExtractionPrompt: false,
-                    feedbackPrompt: false
-                });
-            } else {
-                throw new Error(data.error || 'Failed to update settings');
-            }
-        } catch (error) {
-            showSnackbar(error.message, 'error');
-        } finally {
-            setSaving(false);
-        }
-    };
-
-    const handleEdit = (field) => {
-        setIsEditing(prev => ({ ...prev, [field]: true }));
-    };
-
   return (
     <>
       <AppBar 
@@ -589,7 +496,6 @@ const AdminDashboard = () => {
             <Tab label="Candidate Search" icon={<SearchIcon />} />
             <Tab label="ATS Scoring" icon={<CalculateScoresIcon />} />
             <Tab label="Bulk Upload" icon={<BulkUploadIcon />} />
-            <Tab label="Settings" icon={<SaveIcon />} />
           </Tabs>
         </Box>
 
@@ -1057,126 +963,6 @@ const AdminDashboard = () => {
               </Button>
             )}
           </Box>
-        )}
-
-        {/* Settings Tab */}
-        {activeTab === 3 && (
-            <Box>
-                <Box sx={{ display: "flex", flexDirection: "column", gap: 3 }}>
-                    {/* API Key Section */}
-                    <Box mb={2}>
-                        <Typography variant="h6" gutterBottom sx={{ color: '#1976d2' }}>
-                            Gemini API Key
-                        </Typography>
-                        <Box display="flex" alignItems="center" gap={1}>
-                            <TextField
-                                fullWidth
-                                type={showApiKey ? 'text' : 'password'}
-                                value={settings.geminiApiKey}
-                                onChange={(e) => setSettings({ ...settings, geminiApiKey: e.target.value })}
-                                disabled={!isEditing.geminiApiKey}
-                                variant="outlined"
-                                sx={{ '& .MuiOutlinedInput-root': { borderRadius: 1 } }}
-                            />
-                            <IconButton onClick={() => setShowApiKey(!showApiKey)}>
-                                {showApiKey ? <VisibilityOffIcon /> : <VisibilityIcon />}
-                            </IconButton>
-                            <Tooltip title="Edit API Key">
-                                <IconButton onClick={() => handleEdit('geminiApiKey')} color="primary">
-                                    <EditIcon />
-                                </IconButton>
-                            </Tooltip>
-                        </Box>
-                    </Box>
-
-                    {/* Prompts Section */}
-                    <Grid container spacing={4}>
-                        {/* JSON Extraction Prompt */}
-                        <Grid item xs={12}>
-                            <Typography variant="h6" gutterBottom sx={{ color: '#1976d2' }}>
-                                JSON Extraction Prompt
-                            </Typography>
-                            <Box display="flex" alignItems="start" gap={1}>
-                                <TextField
-                                    fullWidth
-                                    multiline
-                                    rows={4}
-                                    value={settings.jsonExtractionPrompt}
-                                    onChange={(e) => setSettings({ ...settings, jsonExtractionPrompt: e.target.value })}
-                                    disabled={!isEditing.jsonExtractionPrompt}
-                                    variant="outlined"
-                                    sx={{ '& .MuiOutlinedInput-root': { borderRadius: 1 } }}
-                                />
-                                <Tooltip title="Edit Prompt">
-                                    <IconButton onClick={() => handleEdit('jsonExtractionPrompt')} color="primary">
-                                        <EditIcon />
-                                    </IconButton>
-                                </Tooltip>
-                            </Box>
-                        </Grid>
-
-                        {/* JD Extraction Prompt */}
-                        <Grid item xs={12}>
-                            <Typography variant="h6" gutterBottom sx={{ color: '#1976d2' }}>
-                                Job Description Extraction Prompt
-                            </Typography>
-                            <Box display="flex" alignItems="start" gap={1}>
-                                <TextField
-                                    fullWidth
-                                    multiline
-                                    rows={4}
-                                    value={settings.jdExtractionPrompt}
-                                    onChange={(e) => setSettings({ ...settings, jdExtractionPrompt: e.target.value })}
-                                    disabled={!isEditing.jdExtractionPrompt}
-                                    variant="outlined"
-                                    sx={{ '& .MuiOutlinedInput-root': { borderRadius: 1 } }}
-                                />
-                                <Tooltip title="Edit Prompt">
-                                    <IconButton onClick={() => handleEdit('jdExtractionPrompt')} color="primary">
-                                        <EditIcon />
-                                    </IconButton>
-                                </Tooltip>
-                            </Box>
-                        </Grid>
-
-                        {/* Feedback Prompt */}
-                        <Grid item xs={12}>
-                            <Typography variant="h6" gutterBottom sx={{ color: '#1976d2' }}>
-                                Resume Feedback Prompt
-                            </Typography>
-                            <Box display="flex" alignItems="start" gap={1}>
-                                <TextField
-                                    fullWidth
-                                    multiline
-                                    rows={4}
-                                    value={settings.feedbackPrompt}
-                                    onChange={(e) => setSettings({ ...settings, feedbackPrompt: e.target.value })}
-                                    disabled={!isEditing.feedbackPrompt}
-                                    variant="outlined"
-                                    sx={{ '& .MuiOutlinedInput-root': { borderRadius: 1 } }}
-                                />
-                                <Tooltip title="Edit Prompt">
-                                    <IconButton onClick={() => handleEdit('feedbackPrompt')} color="primary">
-                                        <EditIcon />
-                                    </IconButton>
-                                </Tooltip>
-                            </Box>
-                        </Grid>
-                    </Grid>
-                </Box>
-                <Box sx={{ mt: 3, display: 'flex', justifyContent: 'flex-end' }}>
-                    <Button
-                        variant="contained"
-                        color="primary"
-                        onClick={handleSaveSettings}
-                        disabled={saving}
-                        startIcon={saving ? <CircularProgress size={20} /> : <SaveIcon />}
-                        sx={{ mt: 2 }}
-                    >
-                        {saving ? 'Saving...' : 'Save Changes'}
-                    </Button>
-                </Box>
-            </Box>
         )}
 
         <Snackbar
