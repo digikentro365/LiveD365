@@ -126,7 +126,17 @@ export const generateResumePDF = (userId) => API.get(`/generate-cv/${userId}`);
 
 export const updatePersonalInfo = (data) => API.put('/updatePersonalInfo', data);
 export const updateAbout = (data) => API.put('/updateAbout', data);
-export const updateSkills = (data) => API.put('/updateSkills', data);
+export const updateSkills = async (data) => {
+  try {
+    console.log('[Frontend API] Sending skills update with data:', JSON.stringify(data, null, 2));
+    const response = await API.put('/updateSkills', data);
+    console.log('[Frontend API] Received response:', JSON.stringify(response.data, null, 2));
+    return response;
+  } catch (error) {
+    console.error('[Frontend API] Error updating skills:', error);
+    throw error;
+  }
+};
 export const updateWorkExperience = (data) => API.put('/updateWorkExperience', data);
 export const updateProjectExperience = (data) => API.put('/updateProject', data);
 export const updateQualifications = (data) => API.put('/updateQualifications', data);

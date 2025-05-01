@@ -35,7 +35,7 @@ const Dashboard = () => {
 
   const [personalInfo, setPersonalInfo] = useState({ firstName: '', lastName: '', email: '', contactNo: '', city: '', state: '', country: '' });
   const [about, setAbout] = useState({ description: '', linkedInURL: '', professionalTitle: '', primaryRole: '', yearsOfExperience: '' });
-  const [skills, setSkills] = useState([]);
+  const [skills, setSkills] = useState('');
   const [qualification, setQualification] = useState([]);
   const [workExperience, setWorkExperience] = useState([]);
   const [projectExperience, setProjectExperience] = useState([]);
@@ -74,7 +74,7 @@ const Dashboard = () => {
           const u = response.user;
           setPersonalInfo(u.personalInformation || {});
           setAbout(u.about || {});
-          setSkills(u.skills || []);
+          setSkills(u.skills ? u.skills.join(', ') : '');
           setQualification(u.Qualification || []);
           setWorkExperience(u.workExperience || []);
           setProjectExperience(u.projectExperience || []);
@@ -95,101 +95,6 @@ const Dashboard = () => {
     setSnackbar({ open: true, message, severity });
   };
 
-  // Skills State
-
-  // Function to Save Skills
-  const handleSaveSkills = async () => {
-    try {
-      setIsSaving(true);
-      
-      // Ensure skills are properly formatted as strings in an array
-      const skillsData = {
-        skills: Array.isArray(skills) ? skills.map(skill => String(skill).trim()) : []
-      };
-
-      const response = await updateSkills(skillsData);
-
-      if (response?.data?.user?.skills) {
-        // Update local state to match saved state from server response
-        setSkills(response.data.user.skills);
-        showSnackbar('Skills saved successfully!', 'success');
-      } else {
-        throw new Error('Failed to save skills: Invalid response format');
-      }
-    } catch (err) {
-      console.error('Error saving skills:', err);
-      showSnackbar('Failed to save skills', 'error');
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  // Function to Add Skill
-  const handleAddSkill = async (e) => {
-    if (e.key === 'Enter') {
-        e.preventDefault();
-        const newSkill = String(e.target.value).trim();
-        
-        if (!newSkill) return;
-        
-        try {
-            setIsSaving(true);
-            
-            // Create new array with the new skill
-            const updatedSkills = [...(Array.isArray(skills) ? skills : []), newSkill];
-            
-            // Make API call
-            const response = await updateSkills({ skills: updatedSkills });
-
-            // Verify the response contains updated skills
-            if (response?.data?.user?.skills) {
-                setSkills(response.data.user.skills);
-                showSnackbar('Skill added successfully!', 'success');
-                e.target.value = '';
-            } else {
-                throw new Error('Invalid response format');
-            }
-        } catch (err) {
-            console.error('Error adding skill:', err);
-            showSnackbar('Failed to add skill', 'error');
-        } finally {
-            setIsSaving(false);
-        }
-    }
-};
-
-  // Function to Remove Skill
-  const handleRemoveSkill = async (indexToRemove) => {
-    try {
-      setIsSaving(true);
-      // Update local state
-      const updatedSkills = Array.isArray(skills) 
-        ? skills.filter((_, index) => index !== indexToRemove)
-        : [];
-      
-      // Prepare data for API call
-      const skillsData = {
-        skills: updatedSkills
-      };
-
-      // Make API call to save updated skills
-      const response = await updateSkills(skillsData);
-
-      if (response?.data?.user?.skills) {
-        // Update local state to match saved state from server response
-        setSkills(response.data.user.skills);
-        showSnackbar('Skill removed successfully!', 'success');
-      } else {
-        throw new Error('Failed to remove skill: Invalid response format');
-      }
-    } catch (err) {
-      console.error('Error removing skill:', err);
-      showSnackbar('Failed to remove skill', 'error');
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
   const handleLogout = () => {
     localStorage.clear();
     navigate('/login');
@@ -205,9 +110,6 @@ const Dashboard = () => {
           break;
         case 'about':
           response = await updateAbout({ about });
-          break;
-        case 'skills':
-          response = await updateSkills({ skills: skills }); // keep as object
           break;
         case 'Qualification':
           response = await updateQualifications({ Qualification: qualification });
@@ -228,6 +130,29 @@ const Dashboard = () => {
     } catch (err) {
       console.error(err);
       showSnackbar('Save failed', 'error');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleSaveSkills = async () => {
+    try {
+      setIsSaving(true);
+      const skillsArray = skills.split(',').map(skill => skill.trim()).filter(skill => skill);
+      
+      console.log('[Frontend] Saving skills:', skillsArray);
+      
+      const response = await updateSkills({ skills: skillsArray });
+      
+      if (response?.data?.user?.skills) {
+        setSkills(response.data.user.skills.join(', '));
+        showSnackbar('Skills updated successfully!', 'success');
+      } else {
+        throw new Error('Failed to save skills');
+      }
+    } catch (err) {
+      console.error('Error saving skills:', err);
+      showSnackbar('Failed to save skills', 'error');
     } finally {
       setIsSaving(false);
     }
@@ -463,31 +388,19 @@ const Dashboard = () => {
                 <Typography variant="h5" gutterBottom sx={{ fontWeight: 500, color: '#1976d2' }}>
                   Skills
                 </Typography>
-                <Box sx={{ mb: 2 }}>
-                  <Grid container spacing={1}>
-                    {Array.isArray(skills) && skills.map((skill, index) => (
-                      <Grid item key={index}>
-                        <Chip
-                          label={String(skill)}
-                          onDelete={() => handleRemoveSkill(index)}
-                          color="primary"
-                          variant="outlined"
-                          sx={{ borderRadius: 1 }}
-                        />
-                      </Grid>
-                    ))}
-                  </Grid>
-                </Box>
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                  Enter your skills separated by commas (e.g., JavaScript, React, Node.js)
+                </Typography>
                 <TextField
                   fullWidth
-                  label="Add Skill"
-                  placeholder="Type a skill and press Enter"
-                  onKeyDown={handleAddSkill}
+                  multiline
+                  rows={3}
+                  label="Skills"
+                  value={skills}
+                  onChange={(e) => setSkills(e.target.value)}
                   variant="outlined"
-                  sx={{
-                    mb: 2,
-                    '& .MuiOutlinedInput-root': { borderRadius: 1 }
-                  }}
+                  sx={{ mb: 2 }}
+                  placeholder="Enter your skills, separated by commas"
                 />
                 <Button
                   variant="contained"
@@ -610,7 +523,7 @@ const Dashboard = () => {
             </Grid>
           </Grid>
         ) : (
-          <PreviewSection {...{ personalInfo, about, skills, qualification, workExperience, projectExperience, microsoftCertificates }} />
+          <PreviewSection {...{ personalInfo, about, skills: skills.split(',').map(s => s.trim()).filter(s => s), qualification, workExperience, projectExperience, microsoftCertificates }} />
         )}
 
         <Snackbar
@@ -751,12 +664,18 @@ const PreviewSection = ({ personalInfo = {}, about = {}, skills = [], qualificat
     )}
 
     {/* Skills Section */}
-    {Array.isArray(skills) && skills.length > 0 && (
+    {skills.length > 0 && (
       <Box mb={4}>
         <Typography variant="h5" gutterBottom>Skills</Typography>
         <Box display="flex" flexWrap="wrap" gap={1}>
           {skills.map((skill, idx) => (
-            <Chip key={idx} label={String(skill)} color="primary" variant="outlined" />
+            <Chip 
+              key={idx} 
+              label={skill} 
+              color="primary" 
+              variant="outlined"
+              sx={{ borderRadius: 1 }}
+            />
           ))}
         </Box>
       </Box>

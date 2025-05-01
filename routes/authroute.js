@@ -342,7 +342,7 @@ router.post('/register', upload.single('file'), async (req, res) => {
             return res.status(400).json({ error: "Email, Password, and ContactNo are required" });
         }
 
-        const passwordCheck = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/;
+        const passwordCheck = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*():"<>])[A-Za-z\d!@#$%^&*():"<>]{8,}$/;
         if (!passwordCheck.test(password)) {
             return res.status(400).json({
                 error: "Password must contain at least 1 uppercase letter, 1 lowercase letter, 1 digit, and 1 special character."
@@ -1443,10 +1443,15 @@ router.put("/updateWorkExperience/:WorkExperienceId", authenticateToken, async (
 //update skills and store that in extractText field 
 router.put("/updateSkills", authenticateToken, async (req, res) => {
     try {
+        console.log('[Backend] Skills update request received');
+        console.log('[Backend] Request body:', req.body);
+        
         let { skills } = req.body;
+        console.log('[Backend] Extracted skills:', skills);
 
         // Validate skills data exists
         if (!skills) {
+            console.log('[Backend] No skills provided');
             return res.status(400).send({ message: "Skills are required." });
         }
 
@@ -1454,33 +1459,42 @@ router.put("/updateSkills", authenticateToken, async (req, res) => {
         if (typeof skills === "string") {
             try {
                 skills = JSON.parse(skills);
+                console.log('[Backend] Parsed skills string to array:', skills);
             } catch (error) {
-                // If it's a string but not JSON, treat as single skill
                 skills = [skills.trim()];
+                console.log('[Backend] Converted single skill to array:', skills);
             }
         } else if (!Array.isArray(skills)) {
             skills = [String(skills).trim()];
+            console.log('[Backend] Converted non-array to array:', skills);
         }
 
         // Clean the skills array
         skills = skills.map(skill => String(skill).trim()).filter(skill => skill);
+        console.log('[Backend] Cleaned skills array:', skills);
 
         const user = await User.findById(req.user.userId);
-        if (!user) return res.status(404).send({ message: "User not found." });
+        if (!user) {
+            console.log('[Backend] User not found:', req.user.userId);
+            return res.status(404).send({ message: "User not found." });
+        }
 
+        console.log('[Backend] Current user skills:', user.skills);
+        
         // Update skills
         user.skills = skills;
-        await user.save();
+        console.log('[Backend] Updated user skills:', user.skills);
+        
+        const updatedUser = await user.save();
+        console.log('[Backend] Saved user skills:', updatedUser.skills);
 
+        // Send response with the complete user object
         res.status(200).send({ 
             message: "Skills updated successfully", 
-            user: {
-                ...user.toObject(),
-                skills: user.skills
-            }
+            user: updatedUser.toObject()
         });
     } catch (error) {
-        console.error("Error updating skills:", error);
+        console.error('[Backend] Error updating skills:', error);
         res.status(500).send({ message: error.message || "Internal Server Error" });
     }
 });
